@@ -9,7 +9,7 @@ import sqlite3
 import urllib.request
 from typing import Any
 
-CONFIG_PATH = os.getenv('MEM0_CONFIG_PATH', os.path.expanduser('~/.mem0/config_local.json'))
+CONFIG_PATH = os.getenv('MEM0_CONFIG', os.path.expanduser('~/.mem0/config_local.json'))
 DEFAULT_USER = os.getenv('MEM0_USER_ID', 'default-user')
 HISTORY_DB = os.getenv('MEM0_HISTORY_DB', os.path.expanduser('~/.mem0/history.db'))
 CHROMA_DB_PATH = os.getenv('MEM0_CHROMA_PATH', os.path.expanduser('~/.mem0/chroma_db'))

@@ -32,12 +32,12 @@ mem0 默认会将中文记忆翻译成英文存储，导致中文检索命中率
 对于包含明确模块/字段/规则的技术信息，D 策略将其格式化为固定模板：
 
 ```
-metadata: {"category":"reference","structured":{"module":"pharmacyInquiry","field":"timeType","rule":"字符串","keywords":["问诊单","API"]}}
+metadata: {"category":"reference","structured":{"module":"userService","field":"loginType","rule":"字符串","keywords":["登录","API"]}}
 ```
 
 格式化结果：
 ```
-[pharmacyInquiry] timeType: 字符串（关键词: 问诊单, API）
+[userService] loginType: 字符串（关键词: 登录, API）
 ```
 
 格式化后的文本关键词密度更高，检索命中率大幅提升。
@@ -139,3 +139,87 @@ MCP server 启动时：
 4. 两者都失败则抛出 RuntimeError
 
 这样即使 API 挂了，也能自动切换到本地 Ollama 继续工作。
+
+## 为什么 infer 默认按 category 自动（reference 默认 false）
+
+`infer=true` 让 mem0 调用 LLM 对输入内容做"推断抽取"——提取核心意图、去重合并后存储。看起来更智能，但在实际使用中问题很大：
+
+### infer=true 的三大风险
+
+1. **信息丢失**：LLM 会"总结"而非"保留原文"。技术细节（模块名 `userService`、字段名 `loginType`、权限 ID）会被泛化成"某模块的某字段是字符串"，关键词检索命中率暴跌
+2. **语言漂移**：即使有 C 策略（中文锁定），infer 仍可能将中文翻译为英文。实测中，`infer=true` + Ollama qwen2.5:7b 约有 30% 的记忆被翻译成英文
+3. **格式不可控**：infer 的输出格式依赖 LLM 遵守 prompt 约束，不同模型遵守程度差异极大
+
+### 为什么 reference 类型必须原样入库
+
+reference 类记忆的核心价值是**精确可检索**。例如：
+
+```
+输入：userService 模块的 loginType 字段必须是字符串类型，传数字会导致登录接口报错
+
+infer=true 输出：登录模块的登录类型应为字符串格式（信息丢失：模块名、字段名、错误场景）
+verbatim 输出：原样保留全文（可按 userService/loginType/登录/字符串 精确命中）
+```
+
+### 偏好/行为类为什么可以 infer
+
+这类记忆的核心是**意图**而非**细节**：
+- "我喜欢简洁的回答，不要总结" → infer 提取为 "偏好：简洁回复风格"
+- 即便丢失了一些措辞细节，核心意图不变，检索仍有效
+
+### 推荐策略
+
+| 场景 | infer | 原因 |
+|------|-------|------|
+| 技术约定/决策/bug记录 | `false` | 保留精确标识符 |
+| 偏好/习惯/行为 | 留空(自动true) | 提取核心意图即可 |
+| 项目级约定 | `false` | 项目名/字段名不可泛化 |
+
+## 本地 LLM vs 远程 LLM 实测对比
+
+以下基于实际使用中的对比观察（本地 Ollama qwen2.5:7b vs 远程 API glm-5.1/claude-sonnet）：
+
+### Infer 质量
+
+| 维度 | 本地 qwen2.5:7b | 远程 API (claude-sonnet/glm-5.1) |
+|------|-----------------|----------------------------------|
+| 中文保持率 | ~70%，约 30% 被翻译为英文 | ~95%，偶尔漂移 |
+| 细节保留 | 经常丢失模块名/字段名 | 较好保留，但仍会适度泛化 |
+| 输出格式 | 不稳定，有时不遵守 JSON 约束 | 稳定遵守格式约束 |
+| 延迟 | 3-8秒（取决于硬件） | 1-2秒 |
+
+### Merge 去重判断
+
+| 维度 | 本地 qwen2.5:7b | 远程 API |
+|------|-----------------|----------|
+| 准确率 | 约 60%，偶尔误判为 DROP_NEW | 约 85%，判断更精准 |
+| JSON 输出 | 经常输出非 JSON，需 fallback 解析 | 稳定输出 JSON |
+| 风险 | 误删概率较高（宁多勿删兜底） | 误删概率低 |
+
+### 实际建议
+
+- **生产环境**：主配置用远程 API，备用配置用本地 Ollama（LLM 兜底机制自动切换）
+- **纯本地环境**：建议对 reference 类严格 `infer=false`，避免本地模型的 infer 质量问题
+- **混合方案**：嵌入始终用本地 Ollama bge-m3（无需 API，效果稳定），LLM 按场景选择
+
+## 已知限制
+
+### AnthropicLLM provider 丢弃 response_format
+
+mem0 的 `AnthropicLLM` provider 不会将 `response_format` 参数传递给底层 API 调用。这意味着：
+
+- `infer=true` 场景：mem0 内部抽取流程期望 JSON 输出，但 AnthropicLLM 不强制 JSON 格式
+- `merge` 场景（E 策略）：`advise_merge()` 使用 `response_format={'type': 'json_object'}`，但 AnthropicLLM 会忽略此参数，导致输出可能是自由文本而非 JSON
+
+**影响范围**：所有使用 `provider: "anthropic"` 的 infer/merge 流程
+
+**解决方案**：
+1. 使用 `provider: "openai"` 替代（OpenAI provider 正确传递 response_format）
+2. `mem0_add_policy.py` 中的 `_parse_merge_response()` 已内置 fallback 解析（正则提取 JSON），可处理大部分非 JSON 输出
+3. 等 mem0 官方修复此 bug
+
+### 其他限制
+
+- Chroma metadata 仅支持 str/int/float 标量值，嵌套 dict 需序列化为 JSON 字符串
+- history.db 中的 DELETE 事件可能不完整（依赖 mem0 内部行为），keyword_search 通过二次过滤已缓解
+- Hook 超时默认 20 秒，Ollama 响应慢时可能超时

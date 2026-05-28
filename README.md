@@ -8,13 +8,13 @@
 
 ## 为什么需要这个？
 
-官方 [mem0](https://github.com/mem0ai/mem0) 是一个优秀的记忆管理系统，但在实际使用中存在三个痛点：
+[mem0](https://github.com/mem0ai/mem0) 是一个优秀的记忆管理系统，官方也提供了 MCP server 集成。但在以下场景中，官方方案的能力不足：
 
-| 痛点 | 问题 | 本方案解决 |
-|------|------|-----------|
-| 检索不准 | 纯向量检索，关键词匹配差，容易漏召回 | **混合检索**（关键词 + 向量），项目记忆优先 |
-| 写入无策略 | 所有内容一视同仁，中文被翻译成英文，重复记忆堆积 | **B/C/D/E 四层写入策略**：分类分流、中文锁定、结构化格式、LLM 去重 |
-| 无 IDE 集成 | 手动调用 API，无法自动注入上下文 | **MCP server + Hook**，每次输入自动搜索并注入相关记忆 |
+| 场景 | 官方方案的局限 | 本方案增强 |
+|------|---------------|-----------|
+| 中文+技术标识符检索 | mem0 仅向量检索，对中文关键词和 camelCase 标识符（如 `userService`、`loginType`）召回率不足 | **混合检索**（关键词 + 向量），项目记忆优先 |
+| 中文记忆入库 | mem0 的 `use_input_language` 参数不可靠，infer 时中文常被翻译成英文；技术细节会被泛化丢失 | **B/C/D/E 四层写入策略**：分类分流、中文锁定、结构化格式、LLM 去重 |
+| IDE 上下文自动注入 | mem0 有官方 MCP server，但缺少每次输入自动搜索并注入上下文的机制 | **增强 MCP server + Hook**，零干预自动注入 |
 
 ## 核心特性
 
@@ -103,6 +103,28 @@ cp configs/config_api.example.json ~/.mem0/config_local.json
 cp configs/config_ollama.example.json ~/.mem0/config_ollama.json
 ```
 
+### 为什么 reference 类型默认 infer=false？
+
+`infer=true` 会让 LLM "总结"输入内容再入库，但会丢失技术细节（模块名、字段名、权限 ID 被泛化）并可能将中文翻译成英文。reference 类记忆的核心价值是**精确可检索**，原样入库才能保证关键词命中率。
+
+| 场景 | 推荐 infer | 原因 |
+|------|-----------|------|
+| 技术约定/决策/bug | `false` | 保留精确标识符 |
+| 偏好/习惯/行为 | 留空(自动true) | 提取核心意图即可 |
+
+详见 → [docs/architecture.md](docs/architecture.md)
+
+### 本地 vs 远程 LLM
+
+| 维度 | 本地 Ollama | 远程 API |
+|------|------------|---------|
+| infer 中文保持率 | ~70% | ~95% |
+| merge 去重准确率 | ~60% | ~85% |
+| 延迟 | 3-8秒 | 1-2秒 |
+| 成本 | 免费 | 按 token 计费 |
+
+**推荐**：主配置用远程 API，备用配置用本地 Ollama（自动兜底）。嵌入始终用本地 bge-m3（免费、稳定）。
+
 ## Claude Code 集成
 
 ### MCP server 注册
@@ -168,7 +190,7 @@ Cursor Hook 配置见 → [docs/cursor-setup.md](docs/cursor-setup.md)
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
 | `MEM0_DIR` | `~/.mem0` | mem0 安装目录 |
-| `MEM0_CONFIG_PATH` | `~/.mem0/config_local.json` | 主配置文件路径 |
+| `MEM0_CONFIG` | `~/.mem0/config_local.json` | 主配置文件路径 |
 | `MEM0_FALLBACK_CONFIG` | `~/.mem0/config_ollama.json` | 备用配置文件路径 |
 | `MEM0_CHROMA_PATH` | `~/.mem0/chroma_db` | Chroma 向量数据库路径 |
 | `MEM0_HISTORY_DB` | `~/.mem0/history.db` | history.db 路径 |

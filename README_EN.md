@@ -8,13 +8,13 @@ A local mem0 enhancement — hybrid search + smart write policies + Claude Code 
 
 ## Why this project?
 
-The official [mem0](https://github.com/mem0ai/mem0) is a great memory management system, but has three pain points in practice:
+[mem0](https://github.com/mem0ai/mem0) is a great memory management system with an official MCP server. But in certain scenarios, its capabilities fall short:
 
-| Pain point | Problem | Our solution |
-|------------|---------|-------------|
-| Poor recall | Pure vector search misses keyword matches, low recall rate | **Hybrid search** (keyword + vector), project-scoped priority |
-| No write policy | All content treated equally, Chinese text translated to English, duplicate memories pile up | **B/C/D/E write policies**: category routing, Chinese lock, structured formatting, LLM dedup |
-| No IDE integration | Manual API calls, no auto context injection | **MCP server + Hook**, auto-inject relevant memories on every input |
+| Scenario | Official limitation | Our enhancement |
+|----------|--------------------|-----------------|
+| Chinese + technical identifier search | mem0 only does vector search — poor recall for Chinese keywords and camelCase identifiers (`userService`, `loginType`) | **Hybrid search** (keyword + vector), project memory priority |
+| Chinese memory ingestion | mem0's `use_input_language` is unreliable — infer often translates Chinese to English; technical details get generalized | **B/C/D/E write policies**: category routing, Chinese lock, structured formatting, LLM dedup |
+| IDE context auto-injection | mem0 has an official MCP server, but lacks per-input auto-search and context injection | **Enhanced MCP server + Hook**, zero-intervention auto-injection |
 
 ## Core Features
 
@@ -168,7 +168,7 @@ See → [docs/cursor-setup.md](docs/cursor-setup.md) for Hook configuration.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `MEM0_DIR` | `~/.mem0` | mem0 installation directory |
-| `MEM0_CONFIG_PATH` | `~/.mem0/config_local.json` | Primary config path |
+| `MEM0_CONFIG` | `~/.mem0/config_local.json` | Primary config path |
 | `MEM0_FALLBACK_CONFIG` | `~/.mem0/config_ollama.json` | Fallback config path |
 | `MEM0_CHROMA_PATH` | `~/.mem0/chroma_db` | Chroma vector DB path |
 | `MEM0_HISTORY_DB` | `~/.mem0/history.db` | history.db path |
