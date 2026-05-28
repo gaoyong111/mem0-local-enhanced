@@ -1,0 +1,27 @@
+{
+    "version": "1.0",
+    "custom_instructions": "输出语言必须与用户输入一致；输入为中文时记忆正文必须用中文，禁止翻译成英文。保留模块名、字段名、权限ID、API名等原文标识符。只做抽取与去重，不要改写成英文散文。",
+    "embedder": {
+        "provider": "ollama",
+        "config": {
+            "model": "bge-m3",
+            "ollama_base_url": "http://localhost:11434"
+        }
+    },
+    "llm": {
+        "provider": "ollama",
+        "config": {
+            "model": "qwen2.5:7b",
+            "ollama_base_url": "http://localhost:11434",
+            "temperature": 0.1,
+            "max_tokens": 2000
+        }
+    },
+    "vector_store": {
+        "provider": "chroma",
+        "config": {
+            "collection_name": "mem0",
+            "path": "~/.mem0/chroma_db"
+        }
+    }
+}
