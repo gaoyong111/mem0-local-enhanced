@@ -24,7 +24,8 @@
   - **C 中文锁定**：patch mem0 强制 `use_input_language`，infer prompt 约束中文输出
   - **D 结构化格式**：模块名/字段名/规则 → 固定模板格式，关键词检索命中率大幅提升
   - **E LLM 去重**：两层过滤（关键词分数 + token 重叠率）后提交 LLM 判断，宁多勿删
-- **MCP server**：add / search / get_all / delete 四个工具，Claude Code 和 Cursor 直接调用
+- **MCP server**：add / search / get_all / delete / retry_pending 五个工具，Claude Code 和 Cursor 直接调用
+- **写入兜底**：add 失败时自动存入 pending 目录，retry_pending 工具可批量重试，超3次标记需人工介入
 - **Hook 自动注入**：每次用户输入自动搜索相关记忆，注入上下文（Claude Code + Cursor）
 - **LLM 兜底**：主配置失败自动切换到备用配置（比如 API 挂了切换到本地 Ollama）
 - **项目级作用域**：自动从工作目录推断项目标识，项目记忆和全局记忆分层检索
@@ -102,6 +103,12 @@ cp configs/config_api.example.json ~/.mem0/config_local.json
 # 备用配置用 Ollama（API 挂了时自动兜底）
 cp configs/config_ollama.example.json ~/.mem0/config_ollama.json
 ```
+
+### 写入失败兜底
+
+当 mem0 写入失败（MCP 进程异常、LLM 不可用等）时，记忆自动存入 `~/.mem0/pending/` 目录。`retry_pending` 工具扫描该目录逐条重试：成功删除文件，失败累加 retry_count，超过3次标记 `manual_review`。
+
+建议在每日复盘等定时任务中调用 `retry_pending` 清理积压。
 
 ### 为什么 reference 类型默认 infer=false？
 
@@ -213,6 +220,7 @@ Cursor Hook 配置见 → [docs/cursor-setup.md](docs/cursor-setup.md)
 ├── project_aliases.json     # 项目别名映射（自定义）
 ├── config_local.json        # 主配置（自定义）
 ├── config_ollama.json       # 备用配置（可选）
+├── pending/                 # 写入失败待办队列（自动生成）
 ├── chroma_db/               # Chroma 向量数据库（自动生成）
 ├── history.db               # 记忆历史数据库（自动生成）
 ```

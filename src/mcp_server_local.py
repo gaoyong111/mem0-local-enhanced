@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import sys
+import time
 
 # mem0 安装目录
 _MEM0_DIR = os.getenv('MEM0_DIR', os.path.expanduser('~/.mem0'))
@@ -35,6 +36,8 @@ _PRIMARY_CONFIG = os.getenv('MEM0_CONFIG', os.path.expanduser('~/.mem0/config_lo
 _FALLBACK_CONFIG = os.getenv('MEM0_FALLBACK_CONFIG', os.path.expanduser('~/.mem0/config_ollama.json'))
 DEFAULT_USER = os.getenv('MEM0_USER_ID', 'default-user')
 DEFAULT_MAX_RESULTS = 8
+PENDING_DIR = os.path.expanduser('~/.mem0/pending')
+MAX_RETRY_COUNT = 3
 
 mcp = FastMCP('mem0-local')
 
@@ -92,7 +95,12 @@ def add_memory(content: str, metadata: str = '', project: str = '', infer: str =
     if plan.infer_prompt:
         add_kwargs['prompt'] = plan.infer_prompt
 
-    result = _memory.add(plan.content, **add_kwargs)
+    try:
+        result = _memory.add(plan.content, **add_kwargs)
+    except Exception as exc:
+        logger.error('mem0 add 失败，写入 pending 队列: %s', exc)
+        _write_to_pending(plan.content, plan.metadata, project, plan.use_infer)
+        return f'写入mem0失败: {exc}。已自动存入待办队列({PENDING_DIR})，每日复盘时会重试。'
     items = result.get('results', []) if isinstance(result, dict) else []
     if not items:
         return '添加完成（无新记忆产生，可能已存在类似记忆）'
@@ -174,6 +182,83 @@ def delete_memory(memory_id: str) -> str:
         raise
     except IndexError:
         return f'记忆 {memory_id} 已不存在（可能此前已删除）'
+
+
+def _write_to_pending(content: str, metadata: dict, project: str, use_infer: bool) -> None:
+    """写入失败时将记忆存到 pending 目录，等后续重试。"""
+    os.makedirs(PENDING_DIR, exist_ok=True)
+    slug = content[:20].replace(' ', '_').replace('/', '_')
+    filename = f'{slug}_{int(time.time())}.json'
+    filepath = os.path.join(PENDING_DIR, filename)
+    payload = {
+        'content': content,
+        'metadata': metadata,
+        'project': project,
+        'use_infer': use_infer,
+        'retry_count': 0,
+        'created_at': time.strftime('%Y-%m-%dT%H:%M:%S'),
+    }
+    with open(filepath, 'w', encoding='utf-8') as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+    logger.info('已写入 pending: %s', filepath)
+
+
+@mcp.tool()
+def retry_pending() -> str:
+    """扫描 pending 目录，重试写入 mem0。成功则删除文件，失败则 retry_count+1。
+    超过 MAX_RETRY_COUNT 次失败标记为 manual_review。每日复盘 cron 会调用此工具。"""
+    if not os.path.isdir(PENDING_DIR):
+        return 'pending 目录不存在，无需重试'
+
+    files = sorted(f for f in os.listdir(PENDING_DIR) if f.endswith('.json'))
+    if not files:
+        return 'pending 队列空，无需重试'
+
+    success_count = 0
+    fail_count = 0
+    manual_review = []
+
+    for filename in files:
+        filepath = os.path.join(PENDING_DIR, filename)
+        with open(filepath, encoding='utf-8') as f:
+            payload = json.load(f)
+
+        payload['retry_count'] += 1
+        plan = prepare_add_plan(
+            payload['content'],
+            json.dumps(payload.get('metadata', {})),
+            payload.get('project', ''),
+            str(payload.get('use_infer', False)),
+        )
+
+        try:
+            add_kwargs: dict = {
+                'user_id': DEFAULT_USER,
+                'metadata': plan.metadata,
+                'infer': plan.use_infer,
+            }
+            if plan.infer_prompt:
+                add_kwargs['prompt'] = plan.infer_prompt
+            result = _memory.add(plan.content, **add_kwargs)
+            os.remove(filepath)
+            success_count += 1
+        except Exception as exc:
+            if payload['retry_count'] >= MAX_RETRY_COUNT:
+                payload['status'] = 'manual_review'
+                payload['last_error'] = str(exc)
+                with open(filepath, 'w', encoding='utf-8') as f:
+                    json.dump(payload, f, ensure_ascii=False, indent=2)
+                manual_review.append(filename)
+            else:
+                payload['last_error'] = str(exc)
+                with open(filepath, 'w', encoding='utf-8') as f:
+                    json.dump(payload, f, ensure_ascii=False, indent=2)
+                fail_count += 1
+
+    lines = [f'重试完成: 成功{success_count}条, 失败{fail_count}条']
+    if manual_review:
+        lines.append(f'需人工介入: {manual_review}')
+    return '\n'.join(lines)
 
 
 if __name__ == '__main__':
