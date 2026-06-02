@@ -26,6 +26,7 @@
   - **E LLM 去重**：两层过滤（关键词分数 + token 重叠率）后提交 LLM 判断，宁多勿删
 - **MCP server**：add / search / get_all / delete / retry_pending 五个工具，Claude Code 和 Cursor 直接调用
 - **写入兜底**：add 失败时自动存入 pending 目录，retry_pending 工具可批量重试，超3次标记需人工介入
+- **可视化 Web UI**：图谱驱动的记忆浏览界面，Flask + vis.js Network，零 npm
 - **Hook 自动注入**：每次用户输入自动搜索相关记忆，注入上下文（Claude Code + Cursor）
 - **LLM 兜底**：主配置失败自动切换到备用配置（比如 API 挂了切换到本地 Ollama）
 - **项目级作用域**：自动从工作目录推断项目标识，项目记忆和全局记忆分层检索
@@ -72,7 +73,36 @@ python3 ~/.mem0/search_context.py "测试查询"
 
 # 测试 MCP server 启动
 python3 ~/.mem0/mcp_server_local.py
+
+# 启动可视化 Web UI
+python3 ~/.mem0/mem_viewer.py
+# 或使用快捷脚本
+bash ~/.mem0/mem_viewer.sh
 ```
+
+## 可视化 Web UI
+
+`mem_viewer.py` 提供图谱驱动的记忆浏览界面，浏览器打开 `http://localhost:8765` 即可使用。
+
+### 功能
+
+- **交互式图谱**：vis.js Network 网络图，节点=记忆，拖拽/缩放/点击
+- **项目颜色区分**：每个 project 一种颜色，全局记忆灰色
+- **三种厚度可视化**：
+  - 变更厚度 → 节点形状（●圆点=无变更，◆菱形=1次更新，★六角星=2+次更新）
+  - 重复厚度 → 节点大小（越大=该话题被反复独立提及越多）
+  - 连接厚度 → 边数量（关键词重叠≥40%产生实线边，同项目时间链产生虚线边）
+- **搜索高亮**：输入关键词，匹配节点放大高亮，不匹配节点淡出
+- **项目过滤**：下拉选择 project，只显示对应节点
+- **详情面板**：点击节点查看完整正文、metadata、厚度指标、创建时间
+- **删除操作**：详情面板中点击删除，直接操作 ChromaDB + history.db
+
+### 边类型
+
+| 边类型 | 视觉 | 计算规则 |
+|--------|------|---------|
+| 关键词重叠 | 蓝色实线 | 两条记忆关键词重叠≥40% |
+| 时间链 | 灰色虚线 | 同项目内按创建时间相邻的记忆串成链 |
 
 ## 配置说明
 
@@ -214,6 +244,8 @@ Cursor Hook 配置见 → [docs/cursor-setup.md](docs/cursor-setup.md)
 ├── mcp_server_local.py      # MCP server 主入口
 ├── mem0_add_policy.py       # 写入策略 B+C+D+E
 ├── hybrid_search.py         # 混合检索
+├── mem_viewer.py            # 可视化 Web UI（图谱驱动）
+├── mem_viewer.sh            # 可视化启动脚本
 ├── mem0_hook.py             # Hook（Claude Code + Cursor）
 ├── hook_search.py           # Hook 入口包装
 ├── search_context.py        # CLI 调试工具
