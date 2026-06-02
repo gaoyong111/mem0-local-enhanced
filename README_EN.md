@@ -24,7 +24,9 @@ A local mem0 enhancement — hybrid search + smart write policies + Claude Code 
   - **C Chinese lock**: patch mem0 to force `use_input_language`, infer prompt constrains Chinese output
   - **D Structured formatting**: module/field/rule → fixed template format, significantly improves keyword search hit rate
   - **E LLM dedup**: Two-layer filtering (keyword score + token overlap ratio) before LLM judgment, prefers keeping over deleting
-- **MCP server**: add / search / get_all / delete — four tools, callable from Claude Code and Cursor
+- **MCP server**: add / search / get_all / delete / retry_pending — five tools, callable from Claude Code and Cursor
+- **Write fallback**: Auto-saves failed writes to pending directory, retry_pending tool for batch retry, marks for manual review after 3 failures
+- **Visualization Web UI**: Graph-driven memory browsing interface, Flask + vis.js Network, zero npm
 - **Hook auto-injection**: Auto-searches relevant memories on every user input, injects into context (Claude Code + Cursor)
 - **LLM fallback**: Auto-switches to backup config when primary fails (e.g., API down → local Ollama)
 - **Project scoping**: Auto-detects project identifier from working directory, layered recall (project + global)
@@ -103,6 +105,28 @@ cp configs/config_api.example.json ~/.mem0/config_local.json
 cp configs/config_ollama.example.json ~/.mem0/config_ollama.json
 ```
 
+### Why is `infer=false` default for reference type?
+
+`infer=true` lets LLM "summarize" input before storage, but loses technical details (module names, field names, permission IDs get generalized) and may translate Chinese to English. The core value of reference memories is **precise retrievability** — storing verbatim ensures keyword hit rate.
+
+| Scenario | Recommended infer | Reason |
+|----------|-------------------|--------|
+| Technical conventions/decisions/bugs | `false` | Preserve exact identifiers |
+| Preferences/habits/behaviors | Leave blank (auto true) | Extract core intent only |
+
+See → [docs/architecture.md](docs/architecture.md) for details.
+
+### Local vs Remote LLM
+
+| Dimension | Local Ollama | Remote API |
+|-----------|-------------|------------|
+| Chinese retention rate | ~70% | ~95% |
+| Merge dedup accuracy | ~60% | ~85% |
+| Latency | 3-8s | 1-2s |
+| Cost | Free | Pay per token |
+
+**Recommendation**: Use remote API as primary (fast, high quality), local Ollama as backup (auto-fallback). Always use local bge-m3 for embedding (free, stable).
+
 ## Claude Code Integration
 
 ### MCP server registration
@@ -177,6 +201,26 @@ See → [docs/cursor-setup.md](docs/cursor-setup.md) for Hook configuration.
 ## Write Policy Details
 
 → [docs/architecture.md](docs/architecture.md)
+
+## Project Structure
+
+```
+~/.mem0/
+├── mcp_server_local.py      # MCP server main entry
+├── mem0_add_policy.py       # Write policies B+C+D+E
+├── hybrid_search.py         # Hybrid search
+├── mem_viewer.py            # Visualization Web UI (graph-driven)
+├── mem_viewer.sh            # Visualization startup script
+├── mem0_hook.py             # Hook (Claude Code + Cursor)
+├── hook_search.py           # Hook entry wrapper
+├── search_context.py        # CLI debug tool
+├── project_aliases.json     # Project alias mappings (customize)
+├── config_local.json        # Primary config (customize)
+├── config_ollama.json       # Backup config (optional)
+├── pending/                 # Write failure pending queue (auto-generated)
+├── chroma_db/               # Chroma vector database (auto-generated)
+├── history.db               # Memory history database (auto-generated)
+```
 
 ## License
 
