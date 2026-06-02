@@ -69,10 +69,13 @@ def load_all_memories() -> list[dict]:
     memories = []
     for memory_id, text in text_map.items():
         meta = metadata_map.get(memory_id, {})
+        # 归一化 project="全局" → ""，统一灰色显示
+        raw_project = meta.get('project', '')
+        project = '' if raw_project == '全局' else raw_project
         memories.append({
             'id': memory_id,
             'text': text,
-            'project': meta.get('project', ''),
+            'project': project,
             'category': meta.get('category', ''),
             'metadata': meta,
             'created_at': created_at_map.get(memory_id, ''),
@@ -397,6 +400,7 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
   const memoriesMap = {{ memories_map_json | safe }};
   const thicknessMap = {{ thickness_json | safe }};
   let selectedId = null;
+  const deletedNodeIds = new Set();
 
   const nodes = new vis.DataSet(nodesData);
   const edges = new vis.DataSet(edgesData);
@@ -405,7 +409,7 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
   nodesData.forEach(n => { originalNodeColors[n.id] = n.color; });
   const container = document.getElementById('graph-container');
   const options = {
-    nodes: { shape: 'dot', size: 20, font: { size: 11, color: '#e0e0e0' }, borderWidth: 1, borderWidthSelected: 3 },
+    nodes: { shape: 'dot', font: { size: 11, color: '#e0e0e0' }, borderWidth: 1, borderWidthSelected: 3 },
     edges: { color: { color: '#0f3460', highlight: '#3498db', hover: '#2980b9' }, width: 1, smooth: { type: 'continuous' } },
     physics: { barnesHut: { gravitationalConstant: -2000, centralGravity: 0.3, springLength: 100, springConstant: 0.04 }, stabilization: { iterations: 100 } },
     interaction: { hover: true, tooltipDelay: 200, navigationButtons: true, keyboard: true },
@@ -443,20 +447,22 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
 
   function doSearch() {
     const query = document.getElementById('search-input').value.trim();
-    if (!query) { resetGraph(); return; }
+    if (!query) { return; }
+    const currentProject = document.getElementById('project-filter').value;
     fetch('/search?q=' + encodeURIComponent(query))
       .then(r => r.json())
       .then(matchIds => {
-        const allIds = nodes.getIds();
         const matchSet = new Set(matchIds);
-        const nodeUpdates = allIds.map(id => ({
-          id,
-          opacity: matchSet.has(id) ? 1.0 : 0.15,
-          color: originalNodeColors[id],
+        nodes.update(nodesData.filter(n => !deletedNodeIds.has(n.id)).map(n => {
+          const mem = memoriesMap[n.id];
+          const isHiddenByProject = currentProject && mem && mem.project !== currentProject;
+          return {
+            ...n,
+            opacity: isHiddenByProject ? 0 : (matchSet.has(n.id) ? 1.0 : 0.15),
+            hidden: isHiddenByProject ? true : false,
+          };
         }));
-        nodes.update(nodeUpdates);
 
-        // 边也淡出：两端都在匹配集的边保持亮，否则淡出
         const edgeIds = edges.getIds();
         const edgeUpdates = edgeIds.map(eid => {
           const edge = edges.get(eid);
@@ -465,19 +471,29 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
         });
         edges.update(edgeUpdates);
 
+        const totalCount = nodesData.filter(n => !deletedNodeIds.has(n.id)).length;
         document.getElementById('stats').textContent =
-          '匹配 ' + matchIds.length + ' / ' + allIds.length + ' 条记忆';
+          '匹配 ' + matchIds.length + ' / ' + totalCount + ' 条记忆';
+      })
+      .catch(err => {
+        console.error('Search failed:', err);
+        document.getElementById('stats').textContent = '搜索失败，请重试';
       });
   }
 
   document.getElementById('project-filter').addEventListener('change', function() {
+    const query = document.getElementById('search-input').value.trim();
+    if (query) { doSearch(); return; }
     const project = this.value;
-    const allIds = nodes.getIds();
-    const updates = allIds.map(id => ({
-      id,
-      hidden: project && memoriesMap[id] && memoriesMap[id].project !== project,
+    nodes.update(nodesData.filter(n => !deletedNodeIds.has(n.id)).map(n => {
+      const mem = memoriesMap[n.id];
+      const isHidden = project && mem && mem.project !== project;
+      return {
+        ...n,
+        hidden: isHidden ? true : false,
+        opacity: isHidden ? 0 : 1.0,
+      };
     }));
-    nodes.update(updates);
   });
 
   document.getElementById('search-input').addEventListener('keydown', function(e) {
@@ -487,15 +503,12 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
   function resetGraph() {
     document.getElementById('search-input').value = '';
     document.getElementById('project-filter').value = '';
-    const allIds = nodes.getIds();
-    nodes.update(allIds.map(id => ({ id, opacity: 1.0, hidden: false, color: originalNodeColors[id] })));
-    // 还原边的颜色和透明度
-    const edgeIds = edges.getIds();
-    edges.update(edgeIds.map(eid => {
-      const edge = edges.get(eid);
-      const isKeyword = edge.edgeType === 'keyword';
-      return { id: eid, color: { color: isKeyword ? '#3498db' : '#2c3e50', highlight: '#3498db' }, opacity: 1.0 };
-    }));
+    nodes.update(nodesData.filter(n => !deletedNodeIds.has(n.id)).map(n => ({
+      ...n,
+      opacity: 1.0,
+      hidden: false,
+    })));
+    edges.update(edgesData.map(e => ({...e})));
     hideDetail();
     updateStats();
   }
@@ -507,6 +520,7 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
       .then(r => r.json())
       .then(result => {
         if (result.ok) {
+          deletedNodeIds.add(selectedId);
           nodes.remove(selectedId);
           const relatedEdges = edges.getIds().filter(eid => {
             const edge = edges.get(eid);
@@ -546,7 +560,6 @@ def index():
             'label': m['text'][:30] + ('...' if len(m['text']) > 30 else ''),
             'title': m['text'][:60] + ('...' if len(m['text']) > 60 else ''),
             'color': project_colors.get(m['project'], _GLOBAL_COLOR),
-            'group': m['project'] or '全局',
             'shape': thickness[m['id']]['shape'],
             'size': thickness[m['id']]['size'],
             'shadow': thickness[m['id']]['shadow'] if thickness[m['id']]['shadow'] else None,

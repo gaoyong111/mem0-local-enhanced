@@ -1,20 +1,20 @@
 # mem0-local-enhanced
 
-A local mem0 enhancement — hybrid search + smart write policies + Claude Code / Cursor integration
+A local mem0 enhancement — hybrid search + smart write policies + Web UI view
 
 [中文文档 → README.md](README.md)
 
----
+***
 
 ## Why this project?
 
 [mem0](https://github.com/mem0ai/mem0) is a great memory management system with an official MCP server. But in certain scenarios, its capabilities fall short:
 
-| Scenario | Official limitation | Our enhancement |
-|----------|--------------------|-----------------|
-| Chinese + technical identifier search | mem0 only does vector search — poor recall for Chinese keywords and camelCase identifiers (`userService`, `loginType`) | **Hybrid search** (keyword + vector), project memory priority |
-| Chinese memory ingestion | mem0's `use_input_language` is unreliable — infer often translates Chinese to English; technical details get generalized | **B/C/D/E write policies**: category routing, Chinese lock, structured formatting, LLM dedup |
-| IDE context auto-injection | mem0 has an official MCP server, but lacks per-input auto-search and context injection | **Enhanced MCP server + Hook**, zero-intervention auto-injection |
+| Scenario                              | Official limitation                                                                                                      | Our enhancement                                                                              |
+| ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------- |
+| Chinese + technical identifier search | mem0 only does vector search — poor recall for Chinese keywords and camelCase identifiers (`userService`, `loginType`)   | **Hybrid search** (keyword + vector), project memory priority                                |
+| Chinese memory ingestion              | mem0's `use_input_language` is unreliable — infer often translates Chinese to English; technical details get generalized | **B/C/D/E write policies**: category routing, Chinese lock, structured formatting, LLM dedup |
+| IDE context auto-injection            | mem0 has an official MCP server, but lacks per-input auto-search and context injection                                   | **Enhanced MCP server + Hook**, zero-intervention auto-injection                             |
 
 ## Core Features
 
@@ -24,8 +24,8 @@ A local mem0 enhancement — hybrid search + smart write policies + Claude Code 
   - **C Chinese lock**: patch mem0 to force `use_input_language`, infer prompt constrains Chinese output
   - **D Structured formatting**: module/field/rule → fixed template format, significantly improves keyword search hit rate
   - **E LLM dedup**: Two-layer filtering (keyword score + token overlap ratio) before LLM judgment, prefers keeping over deleting
-- **MCP server**: add / search / get_all / delete / retry_pending — five tools, callable from Claude Code and Cursor
-- **Write fallback**: Auto-saves failed writes to pending directory, retry_pending tool for batch retry, marks for manual review after 3 failures
+- **MCP server**: add / search / get\_all / delete / retry\_pending — five tools, callable from Claude Code and Cursor
+- **Write fallback**: Auto-saves failed writes to pending directory, retry\_pending tool for batch retry, marks for manual review after 3 failures
 - **Visualization Web UI**: Graph-driven memory browsing interface, Flask + vis.js Network, zero npm
 - **Hook auto-injection**: Auto-searches relevant memories on every user input, injects into context (Claude Code + Cursor)
 - **LLM fallback**: Auto-switches to backup config when primary fails (e.g., API down → local Ollama)
@@ -109,21 +109,21 @@ cp configs/config_ollama.example.json ~/.mem0/config_ollama.json
 
 `infer=true` lets LLM "summarize" input before storage, but loses technical details (module names, field names, permission IDs get generalized) and may translate Chinese to English. The core value of reference memories is **precise retrievability** — storing verbatim ensures keyword hit rate.
 
-| Scenario | Recommended infer | Reason |
-|----------|-------------------|--------|
-| Technical conventions/decisions/bugs | `false` | Preserve exact identifiers |
-| Preferences/habits/behaviors | Leave blank (auto true) | Extract core intent only |
+| Scenario                             | Recommended infer       | Reason                     |
+| ------------------------------------ | ----------------------- | -------------------------- |
+| Technical conventions/decisions/bugs | `false`                 | Preserve exact identifiers |
+| Preferences/habits/behaviors         | Leave blank (auto true) | Extract core intent only   |
 
 See → [docs/architecture.md](docs/architecture.md) for details.
 
 ### Local vs Remote LLM
 
-| Dimension | Local Ollama | Remote API |
-|-----------|-------------|------------|
-| Chinese retention rate | ~70% | ~95% |
-| Merge dedup accuracy | ~60% | ~85% |
-| Latency | 3-8s | 1-2s |
-| Cost | Free | Pay per token |
+| Dimension              | Local Ollama | Remote API    |
+| ---------------------- | ------------ | ------------- |
+| Chinese retention rate | \~70%        | \~95%         |
+| Merge dedup accuracy   | \~60%        | \~85%         |
+| Latency                | 3-8s         | 1-2s          |
+| Cost                   | Free         | Pay per token |
 
 **Recommendation**: Use remote API as primary (fast, high quality), local Ollama as backup (auto-fallback). Always use local bge-m3 for embedding (free, stable).
 
@@ -189,14 +189,14 @@ See → [docs/cursor-setup.md](docs/cursor-setup.md) for Hook configuration.
 
 ## Environment Variables
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `MEM0_DIR` | `~/.mem0` | mem0 installation directory |
-| `MEM0_CONFIG` | `~/.mem0/config_local.json` | Primary config path |
-| `MEM0_FALLBACK_CONFIG` | `~/.mem0/config_ollama.json` | Fallback config path |
-| `MEM0_CHROMA_PATH` | `~/.mem0/chroma_db` | Chroma vector DB path |
-| `MEM0_HISTORY_DB` | `~/.mem0/history.db` | history.db path |
-| `MEM0_USER_ID` | `default-user` | mem0 user identifier |
+| Variable               | Default                      | Description                 |
+| ---------------------- | ---------------------------- | --------------------------- |
+| `MEM0_DIR`             | `~/.mem0`                    | mem0 installation directory |
+| `MEM0_CONFIG`          | `~/.mem0/config_local.json`  | Primary config path         |
+| `MEM0_FALLBACK_CONFIG` | `~/.mem0/config_ollama.json` | Fallback config path        |
+| `MEM0_CHROMA_PATH`     | `~/.mem0/chroma_db`          | Chroma vector DB path       |
+| `MEM0_HISTORY_DB`      | `~/.mem0/history.db`         | history.db path             |
+| `MEM0_USER_ID`         | `default-user`               | mem0 user identifier        |
 
 ## Write Policy Details
 

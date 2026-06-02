@@ -1,6 +1,6 @@
 # mem0-local-enhanced
 
-本地 mem0 增强方案 —— 混合检索 + 智能写入策略 + Claude Code / Cursor 集成
+本地 mem0 增强方案 —— 混合检索 + 智能写入策略 + WEB UI可视化
 
 [English documentation → README_EN.md](README_EN.md)
 
