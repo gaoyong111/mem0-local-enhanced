@@ -194,7 +194,7 @@ def _write_to_pending(content: str, metadata: dict, project: str, use_infer: boo
         'content': content,
         'metadata': metadata,
         'project': project,
-        'use_infer': use_infer,
+        'use_infer': False,  # 永久关闭infer，pending也强制false
         'retry_count': 0,
         'created_at': time.strftime('%Y-%m-%dT%H:%M:%S'),
     }
@@ -228,7 +228,7 @@ def retry_pending() -> str:
             payload['content'],
             json.dumps(payload.get('metadata', {})),
             payload.get('project', ''),
-            str(payload.get('use_infer', False)),
+            'false',  # 永久关闭infer，pending重试也强制false
         )
 
         try:
