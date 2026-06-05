@@ -81,6 +81,14 @@ Chroma metadata 仅支持标量值，嵌套的 `structured` dict 会被序列化
         └─ 返回最终结果
 ```
 
+### 关键词检索与 DELETE 幽灵记忆
+
+`_load_final_memories()` 从 history.db 构建最终记忆文本时：
+1. 先收集所有 `event=DELETE` 的 memory_id
+2. 再遍历 ADD/UPDATE 行，**排除**已 DELETE 的 id
+
+避免 mem0 删除后 ADD 行仍 `is_deleted=0` 导致关键词检索出现「幽灵记忆」。
+
 ### 关键词计分规则
 
 - 每个关键词在记忆文本中的出现次数 × min(关键词长度, 5)
@@ -97,7 +105,7 @@ Chroma metadata 仅支持标量值，嵌套的 `structured` dict 会被序列化
 
 `detect_project()` 从当前工作目录的 basename 推断项目标识：
 
-1. 先检查 `PROJECT_ALIASES` 映射（从 `~/.mem0/project_aliases.json` 加载）
+1. 读 `~/.mem0/project_aliases.json`（安装时从 `project_aliases.example.json` 复制，**仅本地配置，勿提交真实项目名**）
 2. Generic 目录名（Desktop、Documents 等）返回空字符串（全局）
 3. 其他目录名直接用作项目标识
 
@@ -128,8 +136,23 @@ Chroma metadata 仅支持标量值，嵌套的 `structured` dict 会被序列化
 | `search_memory` | 混合检索，支持 project 限定范围 |
 | `get_all_memories` | 获取所有记忆，支持 project 限定范围 |
 | `delete_memory` | 删除指定 ID 的记忆 |
+| `retry_pending` | 扫描 `~/.mem0/pending/` 批量重试失败写入；≥3 次标记 `manual_review` |
 
-## LLM 兜底机制
+## 三层记忆注入
+
+| 层 | 入口 | 行为 |
+|----|------|------|
+| L1 暖启动 | 项目 `.cursor/hooks.json` sessionStart | 按时间取最近 8 条，不看 query |
+| L2 自动注入 | `~/.cursor/hooks.json` beforeSubmitPrompt / Claude `UserPromptSubmit` | 每次发消息按 query 做 hybrid_search |
+| L3 主动检索 | Agent 调用 MCP `search_memory` | 任务开始前按关键词搜索 |
+
+L2/L3 使用同一套 `hybrid_search.py`；L1 仅做项目上下文预热。
+
+## pending 写入兜底
+
+add 失败时 MCP 写入 `~/.mem0/pending/*.json`（与复盘兜底**同一路径**）。字段：`content`、`metadata`、`project`、`use_infer`、`retry_count`、`created_at`。
+
+复盘 cron 或 `retry_pending` 工具负责重试。详见 → [daily-review-integration.md](daily-review-integration.md)
 
 MCP server 启动时：
 
@@ -223,3 +246,11 @@ mem0 的 `AnthropicLLM` provider 不会将 `response_format` 参数传递给底�
 - Chroma metadata 仅支持 str/int/float 标量值，嵌套 dict 需序列化为 JSON 字符串
 - history.db 中的 DELETE 事件可能不完整（依赖 mem0 内部行为），keyword_search 通过二次过滤已缓解
 - Hook 超时默认 20 秒，Ollama 响应慢时可能超时
+- Ollama 未启动时 MCP 无法初始化（embedding 硬依赖 localhost:11434）
+- 中文关键词子串匹配弱（如「下雨」≠「下大雨」），待改进分词/向量权重
+
+## 相关文档
+
+- [每日复盘集成](daily-review-integration.md) — cron、pending、快照 diff、进化提取
+- [Claude Code 集成](claude-code-setup.md)
+- [Cursor 集成](cursor-setup.md)

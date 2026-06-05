@@ -1,4 +1,5 @@
 {
-    "my-project-dir": "my-project-identifier",
-    "another-dir": "another-project-id"
+    "_comment": "复制到 ~/.mem0/project_aliases.json 并填入你的目录名映射。此文件勿提交真实项目名。",
+    "my-repo-dir-name": "my-mem0-project-id",
+    "another-workspace-folder": "another-project-id"
 }

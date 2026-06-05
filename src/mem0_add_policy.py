@@ -16,9 +16,9 @@ _PATCHED = False
 CHINESE_INFER_INSTRUCTIONS = """
 ## 语言与格式（最高优先级）
 1. 输出语言必须与用户输入一致；输入为中文时，记忆正文必须用中文，禁止翻译成英文。
-2. 保留原文中的模块名、字段名、权限 ID、API 名等原文标识符。
+2. 保留原文中的模块名、字段名、权限 ID、API 名（如 userService、loginType、orderId）。
 3. 只做抽取与去重，不要改写成英文散文；每条记忆仍应是可独立检索的中文完整句。
-4. 技术约定类信息优先保留标识符，不要用泛化描述替代字段名。
+4. 技术约定类信息优先保留 camelCase 标识符，不要用泛化描述替代字段名。
 """.strip()
 
 # E：合并决策 prompt（只输出 JSON，不改写记忆正文）
@@ -27,8 +27,8 @@ MERGE_ADVISOR_SYSTEM = """你是 mem0 记忆去重顾问。比较「新记忆」
 判断标准（严格遵守）：
 - DROP_NEW：新记忆和某条旧记忆描述的是**同一组事实/同一事件/同一决策**，旧记忆已完整覆盖新记忆的信息，新记忆没有任何增量信息。仅当两者核心内容高度重叠时才选 DROP_NEW。
 - KEEP：以下情况一律选 KEEP：
-  1. 新记忆和旧记忆虽然涉及同一主题/项目，但描述的是**不同的事实或不同的事件**
-  2. 新记忆比旧记忆**更详细**或包含增量信息
+  1. 新记忆和旧记忆虽然涉及同一主题/项目，但描述的是**不同的事实或不同的事件**（如一个是bug修复记录，一个是迭代计划讨论）
+  2. 新记忆比旧记忆**更详细**或包含增量信息（旧记忆只提了结论，新记忆补充了根因/方案）
   3. 两者有任何实质性的信息差异
   4. 你不确定是否真正重复
 
@@ -115,7 +115,7 @@ def _extract_structured(meta: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def format_structured_memory(content: str, structured: dict[str, Any]) -> str:
-    """D：将结构化字段格式化为固定模板，便于关键词检索。"""
+    """D：将结构化字段格式化为固定中文模板，便于关键词检索。"""
     module = str(structured.get('module', '')).strip()
     field = str(structured.get('field', '')).strip()
     rule = str(structured.get('rule', '')).strip()
@@ -263,7 +263,7 @@ def advise_merge(
 {chr(10).join(candidate_lines)}
 
 请输出 JSON:
-{{"action":"KEEP"|"DROP_NEW","target_id":"<旧记忆ID或空>","reason":"<简短说明>"}}
+{{"action":"KEEP"|"DROP_NEW","target_id":"<旧记忆ID或空>","reason":"<简短中文>"}}
 """
     try:
         response = llm.generate_response(
@@ -310,7 +310,7 @@ def run_merge_check(
         item for item in results
         if item.get('id') != memory_id and (item.get('score') or 0) >= min_keyword_score
     ]
-    # 第二层：语义 token 重叠率过低则排除
+    # 第二层：语义 token 重叠率过低则排除（关键词高分但内容不同）
     candidates = [
         item for item in candidates
         if _token_overlap_ratio(text, item.get('text', '')) >= min_overlap

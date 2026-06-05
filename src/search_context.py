@@ -1,9 +1,10 @@
 """CLI：按 query 搜索 mem0 并打印上下文（调试用）"""
 
+import json
 import os
 import sys
 
-_MEM0_DIR = os.getenv('MEM0_DIR', os.path.expanduser('~/.mem0'))
+_MEM0_DIR = os.path.expanduser('~/.mem0')
 if _MEM0_DIR not in sys.path:
     sys.path.insert(0, _MEM0_DIR)
 

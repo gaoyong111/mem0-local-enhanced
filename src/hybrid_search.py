@@ -9,10 +9,10 @@ import sqlite3
 import urllib.request
 from typing import Any
 
-CONFIG_PATH = os.getenv('MEM0_CONFIG', os.path.expanduser('~/.mem0/config_local.json'))
-DEFAULT_USER = os.getenv('MEM0_USER_ID', 'default-user')
-HISTORY_DB = os.getenv('MEM0_HISTORY_DB', os.path.expanduser('~/.mem0/history.db'))
-CHROMA_DB_PATH = os.getenv('MEM0_CHROMA_PATH', os.path.expanduser('~/.mem0/chroma_db'))
+CONFIG_PATH = os.path.expanduser('~/.mem0/config_local.json')
+DEFAULT_USER = os.getenv('MEM0_DEFAULT_USER_ID', os.getenv('MEM0_USER_ID', 'default-user'))
+HISTORY_DB = os.path.expanduser('~/.mem0/history.db')
+CHROMA_DB_PATH = os.path.expanduser('~/.mem0/chroma_db')
 
 DEFAULT_TOP_K = 15
 DEFAULT_MAX_RESULTS = 5
@@ -22,21 +22,25 @@ GENERIC_DIR_NAMES = frozenset({
     'Desktop', 'Documents', 'Home', 'home', 'Downloads', 'src', 'code', 'projects', 'tmp',
 })
 
-# 项目别名映射：从 ~/.mem0/project_aliases.json 加载
-_ALIASES_PATH = os.path.expanduser('~/.mem0/project_aliases.json')
+PROJECT_ALIASES_PATH = os.path.join(
+    os.getenv('MEM0_DIR', os.path.expanduser('~/.mem0')),
+    'project_aliases.json',
+)
 
 
 def _load_project_aliases() -> dict[str, str]:
-    """从配置文件加载项目别名映射，不存在时返回空字典。"""
-    try:
-        with open(_ALIASES_PATH, encoding='utf-8') as f:
-            aliases = json.load(f)
-        return aliases if isinstance(aliases, dict) else {}
-    except (FileNotFoundError, json.JSONDecodeError):
+    """从 ~/.mem0/project_aliases.json 加载目录名 -> project 映射（不硬编码在源码）。"""
+    path = os.getenv('MEM0_PROJECT_ALIASES', PROJECT_ALIASES_PATH)
+    if not os.path.isfile(path):
         return {}
-
-
-PROJECT_ALIASES: dict[str, str] = _load_project_aliases()
+    try:
+        with open(path, encoding='utf-8') as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            return {str(k): str(v) for k, v in data.items()}
+    except (json.JSONDecodeError, OSError):
+        pass
+    return {}
 
 
 def _load_config() -> dict[str, Any]:
@@ -53,20 +57,22 @@ def detect_project(cwd: str | None = None) -> str:
     """从工作目录推断 mem0 project 标识。"""
     work_dir = (cwd or os.getcwd()).rstrip('/')
     name = os.path.basename(work_dir) if work_dir else ''
-    if name in PROJECT_ALIASES:
-        return PROJECT_ALIASES[name]
+    aliases = _load_project_aliases()
+    if name in aliases:
+        return aliases[name]
     if name in GENERIC_DIR_NAMES:
         return ''
     return name
 
 
 def extract_keywords(query: str) -> list[str]:
-    """从查询中提取中英文关键词。"""
+    """从查询中提取中英文关键词。中文用滑动窗口提取2-4字词组，避免单字噪音和整句匹配。"""
     keywords: list[str] = []
-    chinese_words = re.findall(r'[一-鿿]{2,}', query)
-    keywords.extend(chinese_words)
-    keywords.extend(re.findall(r'[一-鿿]', query))
-    keywords.extend(re.findall(r'[a-zA-Z0-9_]+', query.lower()))
+    for segment in re.findall(r"[一-鿿]+", query):
+        for size in range(2, min(5, len(segment) + 1)):
+            for i in range(len(segment) - size + 1):
+                keywords.append(segment[i:i + size])
+    keywords.extend(re.findall(r"[a-zA-Z0-9_]+", query.lower()))
     seen: set[str] = set()
     unique: list[str] = []
     for keyword in keywords:
