@@ -24,6 +24,19 @@ mem0-local-enhanced 负责**记忆的存、搜、注入**；每日复盘负责**
 └─────────────────────────────────────────────────────────────┘
 ```
 
+## 对话深度分析（采集环节）
+
+用多代理并行扫描 Claude 和 Cursor 会话 JSONL。
+
+**筛选方式**：按 JSONL 内部 `timestamp` 字段过滤，不用文件修改时间。文件 mtime 可能因编辑而更新，不代表内容实际发生在范围内。
+
+**每个会话文件都必须派代理扫描**，不论长短。短会话代理几秒就完成，但跳过可能遗漏关键信息。
+
+特别关注：
+- 用户重复要求的操作（AI没做到位）
+- 用户频繁提出的问题（可固化为经验）
+- 用户随口偏好或吐槽（preference 类记忆来源）
+
 ## 权威流程
 
 复盘流程的**唯一真相源**：
@@ -84,14 +97,14 @@ HELPER=~/.claude/skills/daily-review/scripts/review_helpers.py
 # 或：HELPER=~/Desktop/mem0-local-enhanced/scripts/review_helpers.py
 
 python3 $HELPER check-missed-run
-python3 $HELPER diff --baseline latest --output ~/daily-reviews/mem0-diff-YYYYMMDD.json
+python3 $HELPER diff --baseline latest --output ~/daily-reviews/.data/mem0-diff-YYYYMMDD.json
 python3 $HELPER snapshot
 python3 $HELPER log-cron-renewal --old <旧id> --new <新id>
 ```
 
 - 读 `history.db` + Chroma metadata，**不依赖 Ollama**
-- 快照：`~/daily-reviews/mem0-snapshot-YYYYMMDD.json`
-- diff 报告：`~/daily-reviews/mem0-diff-YYYYMMDD.json`
+- 快照：`~/daily-reviews/.data/mem0-snapshot-YYYYMMDD.json`
+- diff 报告：`~/daily-reviews/.data/mem0-diff-YYYYMMDD.json`
 - 续期日志：`~/daily-reviews/cron-renewal.log`
 
 ## cron 自续期
@@ -107,7 +120,7 @@ Claude Code cron 有生命周期限制。每日复盘 cron（`3 18 * * *`）在 
 
 ## 进化提取写入 mem0
 
-复盘末尾从当日事件中提炼规律，分四类写入（每次最多 **3 条**）：
+复盘末尾从当日事件中提炼规律，分四类写入：
 
 | 类型 | category | 示例 |
 |------|----------|------|
@@ -124,7 +137,8 @@ Claude Code cron 有生命周期限制。每日复盘 cron（`3 18 * * *`）在 
 |------|------|
 | `~/.mem0/` | mem0 运行时（本仓库 src 部署目标） |
 | `~/.claude/skills/daily-review/SKILL.md` | 复盘流程权威文档 |
-| `~/daily-reviews/` | 复盘文档、TODO-tracker、快照、diff |
+| `~/daily-reviews/` | 复盘文档、TODO-tracker |
+| `~/daily-reviews/.data/` | 快照、diff 报告（机器数据，与文档分离） |
 | `~/.claude/scheduled_tasks.json` | cron 持久化配置 |
 | `~/.cursor/hooks.json` | Cursor beforeSubmitPrompt |
 | `~/.cursor/mcp.json` | Cursor MCP mem0-local |
