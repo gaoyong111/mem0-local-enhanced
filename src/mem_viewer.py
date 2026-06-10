@@ -15,15 +15,25 @@ if _MEM0_DIR not in sys.path:
 from hybrid_search import (  # noqa: E402
     CHROMA_DB_PATH,
     HISTORY_DB,
+    detect_project,
     extract_keywords,
     hybrid_search,
     normalize_project,
 )
+from mem0_add_policy import (  # noqa: E402
+    CATEGORY_COLORS,
+    CATEGORY_LABELS,
+    VALID_CATEGORIES,
+    normalize_category,
+)
+from memory_lineage import build_timeline, record_event  # noqa: E402
 
 # 配置
 HOST = 'localhost'
 PORT = 8765
 DEFAULT_USER = os.getenv('MEM0_USER_ID', 'default-user')
+# 与 mcp_server_local.py DEFAULT_MAX_RESULTS 保持一致，便于对比检索效果
+MCP_SEARCH_MAX_RESULTS = 8
 
 # 项目颜色映射（固定 8 色，超出后循环）
 _PROJECT_COLORS = [
@@ -72,11 +82,15 @@ def load_all_memories() -> list[dict]:
         # 归一化 project="全局" → ""，统一灰色显示
         raw_project = meta.get('project', '')
         project = '' if raw_project == '全局' else raw_project
+        raw_category = str(meta.get('category', '') or '')
+        normalized_category = normalize_category(raw_category)
         memories.append({
             'id': memory_id,
             'text': text,
             'project': project,
-            'category': meta.get('category', ''),
+            'category': normalized_category,
+            'category_raw': raw_category,
+            'category_label': CATEGORY_LABELS.get(normalized_category, normalized_category),
             'metadata': meta,
             'created_at': created_at_map.get(memory_id, ''),
             'update_count': update_count_map.get(memory_id, 0),
@@ -283,6 +297,17 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
   .btn-search { background:#3498db; color:#fff; }
   .btn-reset { background:#e74c3c; color:#fff; }
 
+  .search-results { padding:8px 16px; background:#16213e; border-bottom:1px solid #0f3460; max-height:220px; overflow-y:auto; display:none; }
+  .search-results.visible { display:block; }
+  .search-results-head { font-size:12px; color:#7f8c8d; margin-bottom:8px; }
+  .search-result-item { display:flex; gap:10px; align-items:flex-start; padding:8px 10px; margin-bottom:6px; border-radius:6px; background:#1a1a2e; cursor:pointer; border:1px solid transparent; }
+  .search-result-item:hover { border-color:#3498db; }
+  .search-result-item.dimmed { opacity:0.45; }
+  .search-result-rank { font-size:12px; color:#3498db; min-width:28px; font-weight:600; }
+  .search-result-score { font-size:12px; color:#f39c12; min-width:110px; white-space:nowrap; }
+  .search-result-text { font-size:13px; color:#e0e0e0; line-height:1.5; flex:1; }
+  .search-result-meta { font-size:11px; color:#95a5a6; margin-top:4px; }
+
   .main { display:flex; flex:1; overflow:hidden; }
   #graph-container { flex:1; }
   #detail-panel { width:320px; padding:16px; background:#16213e; border-left:1px solid #0f3460; overflow-y:auto; display:none; }
@@ -293,6 +318,11 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
   .detail-label { font-size:12px; color:#7f8c8d; margin-bottom:4px; }
   .detail-text { font-size:14px; line-height:1.6; white-space:pre-wrap; }
   .detail-meta { font-size:12px; color:#95a5a6; }
+  .timeline-list { list-style:none; padding:0; margin:8px 0 0; }
+  .timeline-item { border-left:2px solid #3498db; padding:6px 0 6px 10px; margin-bottom:8px; }
+  .timeline-item .tl-head { font-size:12px; color:#3498db; margin-bottom:4px; }
+  .timeline-item .tl-body { font-size:12px; color:#bdc3c7; line-height:1.5; white-space:pre-wrap; }
+  .timeline-link { color:#f39c12; cursor:pointer; text-decoration:underline; }
   .btn-delete { margin-top:16px; padding:8px 16px; background:#e74c3c; color:#fff; border:none; border-radius:6px; cursor:pointer; font-size:13px; }
   .btn-delete:hover { opacity:0.8; }
 
@@ -320,23 +350,31 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
     <option value="{{ project }}">{{ project }}</option>
     {% endfor %}
   </select>
+  <select id="category-filter">
+    <option value="">全部分类</option>
+    {% for cat, label in category_items %}
+    <option value="{{ cat }}">{{ label }}</option>
+    {% endfor %}
+  </select>
   <button class="btn-search" onclick="doSearch()">搜索</button>
   <button class="btn-reset" onclick="resetGraph()">重置</button>
 </div>
 
+<div id="search-results" class="search-results">
+  <div class="search-results-head" id="search-results-head"></div>
+  <div id="search-results-list"></div>
+</div>
+
 <div class="legend-panel">
-  <h4>图例</h4>
-  {% for project, color in project_color_items %}
+  <h4>分类颜色</h4>
+  {% for cat, label in category_items %}
   <div class="legend-item">
-    <div class="legend-dot" style="background:{{ color }}"></div>
-    <span>{{ project }}</span>
+    <div class="legend-dot" style="background:{{ category_colors[cat] }}"></div>
+    <span>{{ label }}</span>
   </div>
   {% endfor %}
-  <div class="legend-item">
-    <div class="legend-dot" style="background:{{ global_color }}"></div>
-    <span>全局</span>
-  </div>
   <hr style="border-color:#0f3460;margin:8px 0" />
+  <h4>节点形状</h4>
   <div class="legend-item">
     <div class="legend-shape dot"></div>
     <span>无变更</span>
@@ -373,6 +411,11 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
       <div class="detail-meta" id="detail-scope"></div>
     </div>
     <div class="detail-section">
+      <div class="detail-label">演变时间线</div>
+      <div class="detail-meta" id="detail-ancestors"></div>
+      <ul class="timeline-list" id="detail-timeline"></ul>
+    </div>
+    <div class="detail-section">
       <div class="detail-label">Metadata</div>
       <div class="detail-meta" id="detail-meta"></div>
     </div>
@@ -401,6 +444,9 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
   const thicknessMap = {{ thickness_json | safe }};
   let selectedId = null;
   const deletedNodeIds = new Set();
+  let lastSearchResults = [];
+  let lastSearchPayload = null;
+  const MCP_SEARCH_MAX_RESULTS = {{ mcp_search_max_results }};
 
   const nodes = new vis.DataSet(nodesData);
   const edges = new vis.DataSet(edgesData);
@@ -431,13 +477,91 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
     const thick = thicknessMap[id] || {};
     document.getElementById('detail-title').textContent = mem.project ? '[' + mem.project + ']' : '[全局]';
     document.getElementById('detail-text').textContent = mem.text;
-    document.getElementById('detail-scope').textContent = '项目: ' + (mem.project || '全局') + ' | 分类: ' + (mem.category || '未知') + ' | 创建: ' + (mem.created_at || '未知');
+    document.getElementById('detail-scope').textContent =
+      '项目: ' + (mem.project || '全局') +
+      ' | 分类: ' + (mem.category_label || mem.category || '未知') +
+      (mem.category_raw && mem.category_raw !== mem.category ? ' (原:' + mem.category_raw + ')' : '') +
+      ' | 创建: ' + (mem.created_at || '未知');
     document.getElementById('detail-meta').textContent = JSON.stringify(mem.metadata, null, 2);
     const changeEmoji = thick.change >= 2 ? '★' : thick.change === 1 ? '◆' : '●';
     document.getElementById('detail-thickness').textContent =
       changeEmoji + ' 变更:' + thick.change + '  |  连接:' + thick.connection + '  |  重复:' + thick.repetition;
     document.getElementById('detail-id').textContent = id;
     document.getElementById('detail-panel').classList.add('visible');
+    loadTimeline(id);
+  }
+
+  function actionLabel(action) {
+    const labels = {
+      ADD: '创建',
+      UPDATE: '内容修正',
+      DELETE: '删除',
+      MERGE: '合并',
+      DEDUP_DROP: '去重删除',
+      CATEGORY_CHANGE: '分类变更',
+      GROOMING: '梳理',
+    };
+    return labels[action] || action;
+  }
+
+  function renderTimelineEvents(container, events) {
+    container.innerHTML = '';
+    if (!events || events.length === 0) {
+      container.innerHTML = '<li class="timeline-item"><div class="tl-body">暂无演变记录</div></li>';
+      return;
+    }
+    events.forEach(ev => {
+      const li = document.createElement('li');
+      li.className = 'timeline-item';
+      const sources = (ev.source_ids || []).filter(Boolean);
+      const sourceText = sources.length ? ('来源: ' + sources.join(', ')) : '';
+      const targetText = ev.target_id ? ('保留: ' + ev.target_id) : '';
+      li.innerHTML =
+        '<div class="tl-head">' + (ev.ts || '未知时间') + ' · ' + actionLabel(ev.action) +
+        (ev.origin ? ' (' + ev.origin + ')' : '') + '</div>' +
+        '<div class="tl-body">' +
+        (ev.note ? ev.note + '\\n' : '') +
+        (sourceText ? sourceText + '\\n' : '') +
+        (targetText ? targetText + '\\n' : '') +
+        (ev.content_preview || '') +
+        '</div>';
+      container.appendChild(li);
+    });
+  }
+
+  function loadTimeline(id) {
+    const timelineEl = document.getElementById('detail-timeline');
+    const ancestorsEl = document.getElementById('detail-ancestors');
+    timelineEl.innerHTML = '<li class="timeline-item"><div class="tl-body">加载中...</div></li>';
+    ancestorsEl.textContent = '';
+    fetch('/api/timeline/' + encodeURIComponent(id))
+      .then(r => r.json())
+      .then(data => {
+        renderTimelineEvents(timelineEl, data.events || []);
+        const ancestors = data.ancestor_ids || [];
+        if (ancestors.length) {
+          ancestorsEl.innerHTML = '上游记忆: ' + ancestors.map(aid =>
+            '<span class="timeline-link" onclick="jumpToMemory(\\'' + aid + '\\')">' + aid.slice(0, 8) + '...</span>'
+          ).join(' · ');
+        } else {
+          ancestorsEl.textContent = '上游记忆: 无';
+        }
+      })
+      .catch(err => {
+        console.error('timeline failed', err);
+        timelineEl.innerHTML = '<li class="timeline-item"><div class="tl-body">时间线加载失败</div></li>';
+      });
+  }
+
+  function jumpToMemory(id) {
+    if (!memoriesMap[id]) {
+      alert('该上游记忆已不在当前图谱（可能已删除）');
+      return;
+    }
+    selectedId = id;
+    showDetail(id);
+    network.selectNodes([id]);
+    network.focus(id, { scale: 1.2, animation: true });
   }
 
   function hideDetail() {
@@ -445,35 +569,138 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
     document.getElementById('detail-panel').classList.remove('visible');
   }
 
+  function getFilters() {
+    return {
+      project: document.getElementById('project-filter').value,
+      category: document.getElementById('category-filter').value,
+    };
+  }
+
+  function passesFilters(mem, filters) {
+    if (!mem) return false;
+    if (filters.project && mem.project !== filters.project) return false;
+    if (filters.category && mem.category !== filters.category) return false;
+    return true;
+  }
+
+  function renderSearchResults(payload) {
+    const panel = document.getElementById('search-results');
+    const head = document.getElementById('search-results-head');
+    const list = document.getElementById('search-results-list');
+    lastSearchResults = payload.results || [];
+    lastSearchPayload = payload;
+    if (!lastSearchResults.length) {
+      panel.classList.remove('visible');
+      list.innerHTML = '';
+      return;
+    }
+
+    const filters = getFilters();
+    const scope = payload.effective_project
+      ? ('项目作用域: ' + payload.effective_project)
+      : '项目作用域: 全局（未 detect 到项目，与 MCP project=\"\" 且 cwd 无项目时一致）';
+    head.textContent =
+      '混合检索 Top ' + lastSearchResults.length +
+      '（MCP 同算法 hybrid_search，max=' + payload.max_results + '）· ' + scope +
+      ' · 比对 MCP 请用相同 query + project';
+
+    list.innerHTML = '';
+    lastSearchResults.forEach((item, index) => {
+      const mem = memoriesMap[item.id];
+      const filteredOut = mem && !passesFilters(mem, filters);
+      const row = document.createElement('div');
+      row.className = 'search-result-item' + (filteredOut ? ' dimmed' : '');
+      const scopeTag = item.project ? ('[' + item.project + ']') : '[全局]';
+      row.innerHTML =
+        '<div class="search-result-rank">#' + (index + 1) + '</div>' +
+        '<div class="search-result-score">score=' + Number(item.score).toFixed(2) + '<br>(' + (item.source || 'unknown') + ')</div>' +
+        '<div class="search-result-text">' +
+          item.text +
+          '<div class="search-result-meta">' + scopeTag + ' · ' + item.id +
+          (filteredOut ? ' · 已被项目/分类筛选隐藏' : '') +
+          '</div>' +
+        '</div>';
+      row.onclick = () => focusSearchResult(item.id);
+      list.appendChild(row);
+    });
+    panel.classList.add('visible');
+  }
+
+  function focusSearchResult(id) {
+    if (!memoriesMap[id] || deletedNodeIds.has(id)) {
+      alert('该结果不在当前图谱中（可能已删除）');
+      return;
+    }
+    selectedId = id;
+    showDetail(id);
+    network.selectNodes([id]);
+    network.focus(id, { scale: 1.2, animation: true });
+  }
+
+  function applyGraphVisibility(matchSet, searchResults) {
+    const filters = getFilters();
+    const maxScore = (searchResults && searchResults.length)
+      ? Math.max(...searchResults.map(item => Number(item.score) || 0), 1)
+      : 1;
+
+    nodes.update(nodesData.filter(n => !deletedNodeIds.has(n.id)).map(n => {
+      const mem = memoriesMap[n.id];
+      const passes = passesFilters(mem, filters);
+      const inSearch = matchSet ? matchSet.has(n.id) : true;
+      const result = (searchResults || []).find(item => item.id === n.id);
+      const scoreRatio = result ? (Number(result.score) || 0) / maxScore : 0.15;
+      const dimmed = matchSet ? !matchSet.has(n.id) : false;
+      return {
+        ...n,
+        hidden: matchSet ? (!passes || !inSearch) : !passes,
+        opacity: !passes ? 0 : (matchSet ? (dimmed ? 0.12 : Math.max(0.35, scoreRatio)) : 1.0),
+        borderWidth: result ? 2 : 1,
+      };
+    }));
+
+    if (matchSet) {
+      const edgeIds = edges.getIds();
+      const edgeUpdates = edgeIds.map(eid => {
+        const edge = edges.get(eid);
+        const bothMatch = matchSet.has(edge.from) && matchSet.has(edge.to);
+        return {
+          id: eid,
+          color: bothMatch ? { color: '#3498db', highlight: '#3498db' } : { color: '#1a1a2e', highlight: '#1a1a2e' },
+          opacity: bothMatch ? 1.0 : 0.08,
+        };
+      });
+      edges.update(edgeUpdates);
+    }
+  }
+
   function doSearch() {
     const query = document.getElementById('search-input').value.trim();
-    if (!query) { return; }
-    const currentProject = document.getElementById('project-filter').value;
-    fetch('/search?q=' + encodeURIComponent(query))
+    if (!query) {
+      document.getElementById('search-results').classList.remove('visible');
+      applyGraphVisibility(null, []);
+      updateStats();
+      return;
+    }
+    const projectFilter = document.getElementById('project-filter').value;
+    let url = '/search?q=' + encodeURIComponent(query);
+    if (projectFilter) {
+      url += '&project=' + encodeURIComponent(projectFilter);
+    } else {
+      // 全部项目 = 全局检索（project 空），与 MCP 显式传 project="" 且 detect 不到项目时一致
+      url += '&project=';
+    }
+    fetch(url)
       .then(r => r.json())
-      .then(matchIds => {
-        const matchSet = new Set(matchIds);
-        nodes.update(nodesData.filter(n => !deletedNodeIds.has(n.id)).map(n => {
-          const mem = memoriesMap[n.id];
-          const isHiddenByProject = currentProject && mem && mem.project !== currentProject;
-          return {
-            ...n,
-            opacity: isHiddenByProject ? 0 : (matchSet.has(n.id) ? 1.0 : 0.15),
-            hidden: isHiddenByProject ? true : false,
-          };
-        }));
-
-        const edgeIds = edges.getIds();
-        const edgeUpdates = edgeIds.map(eid => {
-          const edge = edges.get(eid);
-          const bothMatch = matchSet.has(edge.from) && matchSet.has(edge.to);
-          return { id: eid, color: bothMatch ? { color: '#3498db', highlight: '#3498db' } : { color: '#1a1a2e', highlight: '#1a1a2e' }, opacity: bothMatch ? 1.0 : 0.08 };
-        });
-        edges.update(edgeUpdates);
-
-        const totalCount = nodesData.filter(n => !deletedNodeIds.has(n.id)).length;
-        document.getElementById('stats').textContent =
-          '匹配 ' + matchIds.length + ' / ' + totalCount + ' 条记忆';
+      .then(payload => {
+        lastSearchPayload = payload;
+        const results = payload.results || [];
+        const matchSet = new Set(results.map(item => item.id));
+        renderSearchResults(payload);
+        applyGraphVisibility(matchSet, results);
+        const visibleCount = nodes.get().filter(n => !n.hidden).length;
+        document.getElementById('stats').innerHTML =
+          '检索 ' + results.length + ' 条 | 图谱可见 ' + visibleCount + ' 节点' +
+          ' <span class="legend">边框加粗=命中项 | 亮度≈score</span>';
       })
       .catch(err => {
         console.error('Search failed:', err);
@@ -481,20 +708,23 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
       });
   }
 
-  document.getElementById('project-filter').addEventListener('change', function() {
+  function onFilterChange() {
     const query = document.getElementById('search-input').value.trim();
-    if (query) { doSearch(); return; }
-    const project = this.value;
-    nodes.update(nodesData.filter(n => !deletedNodeIds.has(n.id)).map(n => {
-      const mem = memoriesMap[n.id];
-      const isHidden = project && mem && mem.project !== project;
-      return {
-        ...n,
-        hidden: isHidden ? true : false,
-        opacity: isHidden ? 0 : 1.0,
-      };
-    }));
-  });
+    if (query) {
+      if (lastSearchPayload && lastSearchResults.length) {
+        renderSearchResults(lastSearchPayload);
+        applyGraphVisibility(new Set(lastSearchResults.map(item => item.id)), lastSearchResults);
+      } else {
+        doSearch();
+      }
+      return;
+    }
+    applyGraphVisibility(null, []);
+    updateStats();
+  }
+
+  document.getElementById('project-filter').addEventListener('change', onFilterChange);
+  document.getElementById('category-filter').addEventListener('change', onFilterChange);
 
   document.getElementById('search-input').addEventListener('keydown', function(e) {
     if (e.key === 'Enter') doSearch();
@@ -503,10 +733,15 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
   function resetGraph() {
     document.getElementById('search-input').value = '';
     document.getElementById('project-filter').value = '';
+    document.getElementById('category-filter').value = '';
+    document.getElementById('search-results').classList.remove('visible');
+    lastSearchResults = [];
+    lastSearchPayload = null;
     nodes.update(nodesData.filter(n => !deletedNodeIds.has(n.id)).map(n => ({
       ...n,
       opacity: 1.0,
       hidden: false,
+      borderWidth: 1,
     })));
     edges.update(edgesData.map(e => ({...e})));
     hideDetail();
@@ -550,7 +785,6 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
 def index():
     """主页面：渲染图谱。"""
     memories = load_all_memories()
-    project_colors = assign_project_colors(memories)
     edges = compute_edges(memories)
     thickness = compute_thickness(memories, edges)
 
@@ -558,8 +792,8 @@ def index():
         {
             'id': m['id'],
             'label': m['text'][:30] + ('...' if len(m['text']) > 30 else ''),
-            'title': m['text'][:60] + ('...' if len(m['text']) > 60 else ''),
-            'color': project_colors.get(m['project'], _GLOBAL_COLOR),
+            'title': (f"[{m['project']}] " if m['project'] else '[全局] ') + m['text'][:60] + ('...' if len(m['text']) > 60 else ''),
+            'color': CATEGORY_COLORS.get(m['category'], _GLOBAL_COLOR),
             'shape': thickness[m['id']]['shape'],
             'size': thickness[m['id']]['size'],
             'shadow': thickness[m['id']]['shadow'] if thickness[m['id']]['shadow'] else None,
@@ -575,6 +809,7 @@ def index():
     thickness_json = json.dumps(thickness, ensure_ascii=False)
 
     projects = sorted(set(m['project'] for m in memories if m['project']))
+    category_items = [(cat, CATEGORY_LABELS[cat]) for cat in sorted(VALID_CATEGORIES)]
 
     return render_template_string(
         HTML_TEMPLATE,
@@ -583,22 +818,54 @@ def index():
         memories_map_json=memories_map_json,
         thickness_json=thickness_json,
         projects=projects,
+        category_items=category_items,
+        category_colors=CATEGORY_COLORS,
         vis_js_cdn=VIS_JS_CDN,
-        project_color_items=[(p, project_colors[p]) for p in sorted(project_colors)],
         global_color=_GLOBAL_COLOR,
+        mcp_search_max_results=MCP_SEARCH_MAX_RESULTS,
     )
+
+
+@app.route('/api/timeline/<memory_id>')
+def timeline(memory_id: str):
+    """返回记忆的演变时间线（history.db + lineage.jsonl）及上游 ID。"""
+    return jsonify(build_timeline(memory_id))
 
 
 @app.route('/search')
 def search():
-    """搜索接口：返回匹配的 memory ID 列表。"""
+    """搜索接口：与 MCP search_memory 相同 hybrid_search 逻辑，返回带 score 的结果。"""
     query = request.args.get('q', '').strip()
     if not query:
-        return jsonify([])
-    project = request.args.get('project', '')
-    results = hybrid_search(query, project=normalize_project(project), max_results=20)
-    match_ids = [r['id'] for r in results]
-    return jsonify(match_ids)
+        return jsonify({'results': [], 'effective_project': '', 'max_results': MCP_SEARCH_MAX_RESULTS})
+
+    if 'project' in request.args:
+        effective_project = normalize_project(request.args.get('project', ''))
+    else:
+        effective_project = detect_project()
+    results = hybrid_search(
+        query,
+        project=effective_project,
+        max_results=MCP_SEARCH_MAX_RESULTS,
+    )
+
+    payload = []
+    for item in results:
+        payload.append({
+            'id': item.get('id', ''),
+            'score': round(float(item.get('score', 0) or 0), 2),
+            'source': item.get('source', ''),
+            'project': item.get('project', '') or '',
+            'category': item.get('category', '') or '',
+            'text': (item.get('text', '') or '')[:160],
+        })
+
+    return jsonify({
+        'query': query,
+        'effective_project': effective_project,
+        'max_results': MCP_SEARCH_MAX_RESULTS,
+        'results': payload,
+    })
 
 
 @app.route('/delete/<memory_id>', methods=['POST'])
@@ -621,6 +888,13 @@ def delete(memory_id):
             conn.commit()
         finally:
             conn.close()
+
+        record_event(
+            'DELETE',
+            memory_id,
+            note='mem_viewer 删除',
+            actor='mem_viewer',
+        )
 
         return jsonify({'ok': True})
     except Exception as exc:

@@ -89,7 +89,7 @@ cron prompt 精简为引用 skill，完整流程见：
 Ollama 未运行或 `config_local.json` 路径错误。
 
 **Q: infer 把中文变英文？**
-reference 类用 `infer=false`；preference 类可留空走 category 自动。
+infer 已永久关闭，所有写入 verbatim 原样入库。若仍见英文记忆，是历史 infer 遗留，靠 grooming 清理。
 
 **Q: add 失败数据丢了吗？**
 自动进 `~/.mem0/pending/`，用 `retry_pending` 或等复盘 cron 重试。

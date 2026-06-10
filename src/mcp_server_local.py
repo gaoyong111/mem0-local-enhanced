@@ -19,6 +19,7 @@ from mem0_add_policy import (  # noqa: E402
     prepare_add_plan,
     run_merge_check,
 )
+from memory_lineage import parse_merged_from, record_event, record_merge_result  # noqa: E402
 
 apply_mem0_patches()
 
@@ -72,7 +73,7 @@ def _safe_delete(memory_id: str) -> None:
 
 
 @mcp.tool()
-def add_memory(content: str, metadata: str = '', project: str = '', infer: str = '') -> str:
+def add_memory(content: str, metadata: str = '', project: str = '', infer: str = 'false') -> str:
     """添加一条记忆到本地mem0。
 
     content: 要记忆的内容（中文完整句，含模块名/字段名更易检索）
@@ -80,10 +81,13 @@ def add_memory(content: str, metadata: str = '', project: str = '', infer: str =
     metadata: 可选 JSON，例如：
       - {"category":"reference","project":"your-project"}
       - {"category":"reference","structured":{"module":"moduleName","field":"fieldName","rule":"字符串","keywords":["关键词","API"]}}
-      - {"category":"preference"}  （偏好类可走 infer 抽取）
+      - {"category":"episodic"}  （category 标签，五类之一；留空默认 episodic）
+
+    category 取值：episodic（踩坑/事件）、behavior（行为规则）、workflow（流程方法）、
+    reference（事实知识）、preference（用户偏好）。未知/历史标签会自动规范化。
 
     project: 项目标识
-    infer: 留空=按 category 自动；true/false 强制开关。reference 默认原样，preference/workflow/behavior 默认 infer
+    infer: 默认 false；显式 true 亦被忽略，全部 verbatim 原样入库
     """
     plan = prepare_add_plan(content, metadata, project, infer)
 
@@ -112,11 +116,11 @@ def add_memory(content: str, metadata: str = '', project: str = '', infer: str =
     mode_notes = {
         'structured': '结构化原样入库',
         'verbatim': '原样入库',
-        'inferred': '推断抽取',
     }
     mode_note = mode_notes.get(plan.storage_mode, '原样入库')
 
     merge_notes: list[str] = []
+    lineage_notes: list[str] = []
     if plan.run_merge_check and ids and ids[0] != '?':
         merge_note = run_merge_check(
             _memory.llm,
@@ -131,9 +135,21 @@ def add_memory(content: str, metadata: str = '', project: str = '', infer: str =
             if '已删除' in merge_note:
                 return f'记忆[{scope}]（{mode_note}）与已有记忆重复，未新增。{merge_note}'
 
-    infer_note = '推断合并' if plan.use_infer else mode_note
-    extra = f'；{"；".join(merge_notes)}' if merge_notes else ''
-    return f'已处理记忆[{scope}]（{infer_note}），ID: {ids}, 事件: {events}{extra}'
+    if ids and ids[0] != '?':
+        merged_sources = parse_merged_from(plan.metadata)
+        if merged_sources:
+            record_merge_result(
+                ids[0],
+                merged_sources,
+                category=str(plan.metadata.get('category', '') or ''),
+                content_preview=plan.content,
+                actor='add_memory',
+            )
+            lineage_notes.append(f'合并留痕：来源 {",".join(merged_sources)}')
+
+    extra_parts = merge_notes + lineage_notes
+    extra = f'；{"；".join(extra_parts)}' if extra_parts else ''
+    return f'已处理记忆[{scope}]（{mode_note}），ID: {ids}, 事件: {events}{extra}'
 
 
 @mcp.tool()
@@ -175,6 +191,12 @@ def delete_memory(memory_id: str) -> str:
     """删除一条记忆。memory_id为要删除的记忆ID"""
     try:
         _memory.delete(memory_id)
+        record_event(
+            'DELETE',
+            memory_id,
+            note='MCP delete_memory',
+            actor='mcp',
+        )
         return f'已删除记忆 {memory_id}'
     except ValueError as error:
         if 'not found' in str(error).lower():

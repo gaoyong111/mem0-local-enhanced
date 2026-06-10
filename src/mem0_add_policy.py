@@ -1,4 +1,4 @@
-"""mem0 写入策略：B 分类分流 + C 语言锁 + D 结构化 reference + E 合并决策（不改写正文）"""
+"""mem0 写入策略：B 分类标签 + C 语言锁 + D 结构化 reference + E 合并决策（不改写正文）；infer 永久关闭"""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 _PATCHED = False
 
-# B + C：infer=true 时附加到 mem0 prompt（与 config custom_instructions 一致）
+# C：infer 已永久关闭；以下 prompt 保留供参考，当前写入路径不启用
 CHINESE_INFER_INSTRUCTIONS = """
 ## 语言与格式（最高优先级）
 1. 输出语言必须与用户输入一致；输入为中文时，记忆正文必须用中文，禁止翻译成英文。
@@ -37,6 +37,43 @@ MERGE_ADVISOR_SYSTEM = """你是 mem0 记忆去重顾问。比较「新记忆」
 你只能输出 JSON，不得改写或生成新的记忆正文。"""
 
 STRUCTURED_META_KEYS = ('module', 'field', 'rule')
+
+VALID_CATEGORIES = frozenset({
+    'episodic',
+    'behavior',
+    'workflow',
+    'reference',
+    'preference',
+})
+
+CATEGORY_LABELS: dict[str, str] = {
+    'episodic': '踩坑/事件',
+    'behavior': '行为规则',
+    'workflow': '流程方法',
+    'reference': '事实知识',
+    'preference': '用户偏好',
+}
+
+CATEGORY_COLORS: dict[str, str] = {
+    'episodic': '#9b59b6',
+    'behavior': '#e74c3c',
+    'workflow': '#2ecc71',
+    'reference': '#3498db',
+    'preference': '#f39c12',
+}
+
+DEFAULT_CATEGORY = 'episodic'
+
+# 历史一次性标签 → 规范 category（只影响展示与写入规范化，不改 Chroma 存量）
+LEGACY_CATEGORY_MAP: dict[str, str] = {
+    'tech-stack': 'reference',
+    'api': 'reference',
+    'module': 'reference',
+    'architecture': 'reference',
+    'dictionary': 'reference',
+    'permission': 'reference',
+    'state': 'reference',
+}
 
 
 class LlmClient(Protocol):
@@ -141,19 +178,48 @@ def format_structured_memory(content: str, structured: dict[str, Any]) -> str:
     return formatted or content.strip()
 
 
+def normalize_category(raw: Any) -> str:
+    """将 category 规范为五类之一；空值默认 episodic，未知 legacy 映射或 fallback reference。"""
+    key = str(raw or '').strip().lower()
+    if not key:
+        return DEFAULT_CATEGORY
+    if key in VALID_CATEGORIES:
+        return key
+    mapped = LEGACY_CATEGORY_MAP.get(key)
+    if mapped:
+        return mapped
+    logger.warning('unknown category %r, fallback reference', key)
+    return 'reference'
+
+
+def apply_lineage_metadata(meta: dict[str, Any]) -> dict[str, Any]:
+    """规范化 merged_from 为 Chroma 可存的逗号分隔字符串。"""
+    raw = meta.get('merged_from')
+    if isinstance(raw, list):
+        ids = [str(item).strip() for item in raw if str(item).strip()]
+        if ids:
+            meta['merged_from'] = ','.join(ids)
+    elif raw is not None and str(raw).strip():
+        meta['merged_from'] = str(raw).strip()
+    return meta
+
+
+def apply_category_metadata(meta: dict[str, Any]) -> dict[str, Any]:
+    """写入前规范化 metadata.category。"""
+    raw = meta.get('category', '')
+    normalized = normalize_category(raw)
+    if raw and str(raw).strip().lower() != normalized:
+        meta['category_raw'] = str(raw).strip()
+    meta['category'] = normalized
+    return meta
+
+
 def should_use_infer(metadata: dict[str, Any], infer_flag: str) -> bool:
-    """B：仅偏好/行为类默认 infer；infer 留空时按 category 自动，显式 false 才强制关闭。"""
+    """infer 已永久关闭；显式 true 亦忽略。category 仅作标签，不触发推断抽取。"""
     flag = (infer_flag or '').strip().lower()
-    if flag in ('true', '1', 'yes'):
-        return True
-    if flag in ('false', '0', 'no'):
-        return False
-    if metadata.get('infer') is True:
-        return True
-    if metadata.get('infer') is False:
-        return False
-    category = str(metadata.get('category', '')).lower()
-    return category in ('preference', 'workflow', 'behavior')
+    if flag in ('true', '1', 'yes') or metadata.get('infer') is True:
+        logger.warning('infer=true 已废弃，强制 verbatim 入库')
+    return False
 
 
 def prepare_add_plan(
@@ -182,6 +248,8 @@ def prepare_add_plan(
         keywords = _normalize_keywords(structured.get('keywords'))
         if keywords:
             meta['keywords'] = ','.join(keywords)
+        apply_category_metadata(meta)
+        apply_lineage_metadata(meta)
         return AddPlan(
             content=canonical,
             metadata=meta,
@@ -191,19 +259,11 @@ def prepare_add_plan(
             storage_mode='structured',
         )
 
-    use_infer = should_use_infer(meta, infer_flag)
-    if use_infer:
-        meta['storage_mode'] = 'inferred'
-        return AddPlan(
-            content=content.strip(),
-            metadata=meta,
-            use_infer=True,
-            infer_prompt=CHINESE_INFER_INSTRUCTIONS,
-            run_merge_check=False,
-            storage_mode='inferred',
-        )
+    should_use_infer(meta, infer_flag)
 
     meta['storage_mode'] = meta.get('storage_mode') or 'verbatim'
+    apply_category_metadata(meta)
+    apply_lineage_metadata(meta)
     return AddPlan(
         content=content.strip(),
         metadata=meta,
@@ -329,4 +389,16 @@ def run_merge_check(
         return None
 
     target = decision.target_id or candidates[0].get('id', '')
+    try:
+        from memory_lineage import record_dedup_drop
+
+        record_dedup_drop(
+            memory_id,
+            target,
+            note=decision.reason,
+            content_preview=text,
+        )
+    except Exception as error:
+        logger.warning('lineage record failed: %s', error)
+
     return f'去重：新记忆已删除（与 {target} 重复）。{decision.reason}'

@@ -128,8 +128,9 @@ Claude Code cron 有生命周期限制。每日复盘 cron（`3 18 * * *`）在 
 | 可复用流程 | workflow | 「legacy 页面改 JS+HTML+CSS 三件套」 |
 | 领域知识 | reference | 「某模块某字段为字符串类型」 |
 | 用户偏好 | preference | 「一步操作不走 skill」 |
+| 踩坑/事件 | episodic | 「某次 bug 根因与修复」；不确定分类时用此项 |
 
-每条须含 **Why** + **How to apply**。写入前 `search_memory` 查重；reference 类用 `infer=false`。
+每条须含 **Why** + **How to apply**。写入前 `search_memory` 查重；统一 `infer=false`；category 漏填默认 episodic。
 
 ## 相关文件一览
 
@@ -137,7 +138,7 @@ Claude Code cron 有生命周期限制。每日复盘 cron（`3 18 * * *`）在 
 |------|------|
 | `~/.mem0/` | mem0 运行时（本仓库 src 部署目标） |
 | `~/.claude/skills/daily-review/SKILL.md` | 复盘流程权威文档 |
-| `~/daily-reviews/` | 复盘文档、TODO-tracker |
+| `~/daily-reviews/` | 复盘文档、TODO-tracker（备注必须写详细：为什么提、什么场景触发、预期方向） |
 | `~/daily-reviews/.data/` | 快照、diff 报告（机器数据，与文档分离） |
 | `~/.claude/scheduled_tasks.json` | cron 持久化配置 |
 | `~/.cursor/hooks.json` | Cursor beforeSubmitPrompt |
@@ -145,6 +146,4 @@ Claude Code cron 有生命周期限制。每日复盘 cron（`3 18 * * *`）在 
 
 ## 已知待办（mem0 质量）
 
-- category 分流 vs infer 永久关闭的策略统一（TODO-tracker #9）
-- 文件记忆（`~/.claude/projects/.../memory/`）与 mem0 存储重叠（#10）
 - hybrid_search 中文子串匹配（「下雨」≠「下大雨」）（#18）

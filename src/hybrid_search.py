@@ -50,7 +50,15 @@ def _load_config() -> dict[str, Any]:
 
 def normalize_project(project: str) -> str:
     """统一项目标识，空字符串表示全局。"""
-    return (project or '').strip()
+    value = (project or '').strip()
+    if value == '全局':
+        return ''
+    return value
+
+
+def _project_matches(item_project: str, target_project: str) -> bool:
+    """判断记忆的 project 标签是否属于目标项目作用域。"""
+    return normalize_project(item_project) == normalize_project(target_project)
 
 
 def detect_project(cwd: str | None = None) -> str:
@@ -275,8 +283,13 @@ def merge_and_rank(
     if not project:
         return merged[:max_results]
 
-    project_items = [item for item in merged if item.get('project') == project]
-    global_items = [item for item in merged if item.get('project') != project]
+    project_items = [item for item in merged if _project_matches(item.get('project', ''), project)]
+    global_items = [item for item in merged if not _project_matches(item.get('project', ''), project)]
+
+    # 指定 project 但检索结果里没有该项目记忆时，退回全量 Top-N（避免只剩 2 条全局）
+    if not project_items:
+        return merged[:max_results]
+
     final = project_items[:max(3, max_results - 2)] + global_items[:2]
     return final[:max_results]
 

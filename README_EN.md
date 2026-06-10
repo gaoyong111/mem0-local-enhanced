@@ -13,7 +13,7 @@ Local mem0 enhancement — hybrid search + smart write policies + three-layer in
 | Scenario | Official gap | Our enhancement |
 |----------|--------------|-----------------|
 | Chinese + camelCase search | Vector-only, poor keyword recall | **Hybrid search** (history.db keywords + bge-m3 vectors) |
-| Chinese ingestion | infer often English-translates content | **B/C/D/E policies**: routing, language lock, structured format, LLM dedup |
+| Chinese ingestion | infer English-translates / loses identifiers | **B/C/D/E policies**: category tags, language lock, structured format, LLM dedup; **infer permanently off** |
 | IDE context | MCP exists, no per-input auto-inject | **Hooks + MCP** for Claude Code & Cursor |
 | Ops | No write fallback, no review loop | **pending queue + daily cron + snapshot diff** |
 
@@ -32,7 +32,7 @@ Daily review (cron 18:03 + skill) → evolve memories → snapshot baseline
 ## Core Features
 
 - **Hybrid search** with project scoping and DELETE ghost filtering
-- **Write policies B/C/D/E** (category routing, Chinese lock, structured refs, LLM dedup)
+- **Write policies B/C/D/E** (category tags, Chinese lock, structured refs, LLM dedup; infer permanently off)
 - **MCP tools**: add / search / get_all / delete / **retry_pending**
 - **Pending fallback** at `~/.mem0/pending/` (shared by MCP and daily review)
 - **Hooks** for Claude Code & Cursor auto-injection
@@ -75,7 +75,7 @@ python3 scripts/review_helpers.py snapshot
 | Claude Code | [docs/claude-code-setup.md](docs/claude-code-setup.md) |
 | Cursor | [docs/cursor-setup.md](docs/cursor-setup.md) |
 
-Use **absolute python paths** (pyenv). Write technical facts with **`infer=false`**.
+Use **absolute python paths** (pyenv). All writes use **`infer=false`** (default; explicit `true` is ignored).
 
 ## Configuration
 

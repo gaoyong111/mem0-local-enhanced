@@ -34,8 +34,8 @@
 ### 检索与写入
 
 - **混合检索**：关键词 + 向量双路召回，项目记忆优先，排除 DELETE 幽灵记忆
-- **B 分类分流**：reference 原样，preference/workflow/behavior 可 infer
-- **C 中文锁定**：patch `use_input_language` + infer prompt 约束
+- **B 分类标签**：五类规范（episodic/behavior/workflow/reference/preference），写入自动规范化，mem_viewer 按类筛选/上色
+- **C 中文锁定**：patch `use_input_language`（infer 路径已关闭）
 - **D 结构化格式**：`[module] field: rule（关键词: …）` 提升命中率
 - **E LLM 去重**：关键词 + Jaccard 预筛后 LLM 判 KEEP/DROP_NEW，宁多勿删
 
@@ -45,7 +45,8 @@
 - **pending 兜底**：写入失败 → `~/.mem0/pending/`，复盘或 retry_pending 重试
 - **LLM 兜底**：主配置失败自动切 `config_ollama.json`
 - **Hook 注入**：Claude `UserPromptSubmit` + Cursor `beforeSubmitPrompt`
-- **mem_viewer**：Flask + vis.js 图谱浏览，localhost:8765
+- **mem_viewer**：Flask + vis.js 图谱；category 筛选/上色、混合检索结果面板（score+source）、演变时间线
+- **memory_lineage**：`lineage.jsonl` 记录 MERGE/DEDUP/DELETE，grooming 合并须带 `merged_from`
 
 ### 每日复盘闭环（Claude Code cron）
 
@@ -115,7 +116,7 @@ python3 scripts/review_helpers.py snapshot
 要点：
 - MCP 注册 `mem0-local` → `~/.mem0/mcp_server_local.py`
 - Hook 用 **python 绝对路径**（pyenv）
-- reference 写入 **`infer=false`**
+- 所有写入 **`infer=false`**（默认即 false，显式 true 亦被忽略）
 
 ## 配置说明
 
@@ -133,18 +134,15 @@ cp configs/config_ollama.example.json ~/.mem0/config_ollama.json
 
 **唯一路径** `~/.mem0/pending/` — MCP 失败、复盘兜底、retry_pending 共用。
 
-### infer 怎么用？
+### infer
 
-| 场景 | infer | 原因 |
-|------|-------|------|
-| 技术约定 / API / 字段 | `false` | 保留标识符 |
-| 偏好 / 行为 / 流程 | 留空 | category 自动 true |
+**已永久关闭**。所有 category 统一 verbatim 原样入库；显式 `infer=true` 亦被忽略。
 
 → 详见 [docs/architecture.md](docs/architecture.md)
 
 ## 可视化 Web UI
 
-`mem_viewer.py` — 图谱浏览记忆，支持项目着色、搜索高亮、厚度指标、删除操作。
+`mem_viewer.py` — 图谱浏览记忆：category 筛选/上色、混合检索结果面板（score+source，与 MCP 同算法）、演变时间线、厚度指标、删除。
 
 设计规格 → [docs/superpowers/specs/2026-06-01-mem-viewer-design.md](docs/superpowers/specs/2026-06-01-mem-viewer-design.md)
 
@@ -158,6 +156,7 @@ mem0-local-enhanced/          # 本仓库（源码 + 文档）
 │   ├── hybrid_search.py
 │   ├── mem0_hook.py
 │   ├── mem_viewer.py
+│   ├── memory_lineage.py
 │   └── ...
 ├── scripts/
 │   └── review_helpers.py     # 复盘：快照/diff/漏跑/续期日志

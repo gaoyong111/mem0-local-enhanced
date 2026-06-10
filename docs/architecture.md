@@ -4,28 +4,43 @@
 
 ## 写入策略
 
-### B：分类分流（Category Routing）
+### B：分类标签（Category Tags）
 
-不同类型的记忆应采用不同的存储策略：
+`category` 仅作 metadata 标签，用于 mem_viewer 筛选、复盘进化提取分类。**不决定存储模式**。
 
-| category | 存储模式 | 说明 |
-|----------|---------|------|
-| `reference` | verbatim（原样入库） | 事实/决策/约定类，保留原文，不做推断改写 |
-| `preference` | inferred（推断抽取） | 偏好类，允许 LLM 抽取核心意图 |
-| `workflow` | inferred | 流程类，允许 LLM 形式化 |
-| `behavior` | inferred | 行为类，允许 LLM 归纳 |
+| category | 典型用途 |
+|----------|---------|
+| `reference` | 事实、技术约定、领域知识 |
+| `preference` | 用户偏好 |
+| `workflow` | 可复用流程/方法论 |
+| `behavior` | 行为规则类发现 |
+| `episodic` | 踩坑、决策、事件记录 |
 
-`infer` 参数控制：
-- 留空：按 category 自动判断
-- `true`：强制开启推断
-- `false`：强制关闭推断
+所有 category **统一 verbatim 原样入库**（含 `structured` 的走 D 策略确定性格式化，不经 LLM 推断抽取）。
+
+**规范五类**（写入时 `metadata.category`，MCP 会自动规范化）：
+
+| category | 用途 | mem_viewer 显示 |
+|----------|------|-----------------|
+| episodic | 踩坑、决策、事件；**默认**（留空时） | 踩坑/事件 |
+| behavior | 行为规则 | 行为规则 |
+| workflow | 流程/方法论 | 流程方法 |
+| reference | 事实、技术约定 | 事实知识 |
+| preference | 用户偏好 | 用户偏好 |
+
+历史非标标签（如 `api`、`module`）在写入/展示时映射为 `reference`；空标签展示为 `episodic`。
+
+`infer` 参数（**已永久关闭**）：
+- 默认 `false`
+- 显式 `true`：**忽略**，强制 verbatim
+- 原因：infer 导致信息丢失、英文化、过度拆分；三 provider 均不可靠
 
 ### C：中文锁定（Chinese Language Lock）
 
 mem0 默认会将中文记忆翻译成英文存储，导致中文检索命中率极低。C 策略通过两个层面锁定中文：
 
-1. **Monkey-patch**：`apply_mem0_patches()` 在 Memory 初始化前修改 `mem0.configs.prompts.generate_additive_extraction_prompt`，强制传入 `use_input_language=True`
-2. **Infer prompt**：`CHINESE_INFER_INSTRUCTIONS` 作为 `prompt` 参数传入 `memory.add()`，约束 LLM 输出语言与输入一致
+1. **Monkey-patch**：`apply_mem0_patches()` 在 Memory 初始化前修改 `mem0.configs.prompts.generate_additive_extraction_prompt`，强制传入 `use_input_language=True`（保留以备 mem0 上游行为变化；当前 infer 路径已关闭）
+2. ~~**Infer prompt**~~：infer 已永久关闭，不再传入 `CHINESE_INFER_INSTRUCTIONS`
 
 ### D：结构化格式化（Structured Formatting）
 
@@ -73,11 +88,10 @@ Chroma metadata 仅支持标量值，嵌套的 `structured` dict 会被序列化
     │   └─ 返回 top_k 结果
     │
     └── 合并排序（merge_and_rank）
-        ├─ 去重合并（同一 ID 的关键词+向量结果加分）
-        ├─ 项目记忆优先排序
-        │   ├─ 项目记忆最多 max(3, max_results-2) 条
-        │   ├─ 全局记忆最多 2 条
-        │   └─ 合计不超过 max_results 条
+        ├─ 去重合并（同一 ID 的关键词+向量结果：final = keyword + vector×0.5）
+        ├─ 项目记忆优先（仅当指定 project 且确有该项目命中时）
+        │   ├─ 项目记忆最多 max(3, max_results-2) 条 + 全局最多 2 条
+        │   └─ **若无该项目命中 → 退回全量 Top-N**（避免只剩 2 条全局）
         └─ 返回最终结果
 ```
 
@@ -99,7 +113,14 @@ Chroma metadata 仅支持标量值，嵌套的 `structured` dict 会被序列化
 
 - Chroma 返回的是 cosine distance
 - score = 1.0 - distance / 2.0（近似 cosine similarity）
-- 低于 `MIN_VECTOR_SCORE`（0.35）的结果被过滤
+- 低于 `MIN_VECTOR_SCORE`（0.35）的**向量路**结果被过滤
+
+**注意**：最终展示的 `score` 与 `source` 必须一起看：
+- `keyword`：子串命中累加（2～30+），高分≠语义相关
+- `vector`：仅 embedding 距离（小库常全在 0.71～0.87），0.35 阈值在小规模库上几乎不过滤
+- `keyword+vector`：两路合并分，不可当作 0～1 的相关度百分比
+
+mem_viewer 搜索面板与 MCP 使用同一 `hybrid_search`（max=8），展示 rank / score / source 便于对比。
 
 ### 项目检测
 
@@ -154,6 +175,15 @@ add 失败时 MCP 写入 `~/.mem0/pending/*.json`（与复盘兜底**同一路�
 
 复盘 cron 或 `retry_pending` 工具负责重试。详见 → [daily-review-integration.md](daily-review-integration.md)
 
+## 记忆演变留痕（lineage）
+
+| 数据源 | 记录什么 |
+|--------|----------|
+| `history.db` | mem0 原生 ADD / DELETE（暂无 UPDATE） |
+| `lineage.jsonl` | MERGE（grooming 合并）、DEDUP_DROP（E 去重）、MCP/viewer 删除 |
+
+grooming 合并写入时 metadata 须带 `merged_from`（来源 ID）。mem_viewer 详情面板「演变时间线」可查看并点击上游 ID。
+
 MCP server 启动时：
 
 1. 尝试加载主配置（`MEM0_CONFIG` 指定的路径）
@@ -163,42 +193,19 @@ MCP server 启动时：
 
 这样即使 API 挂了，也能自动切换到本地 Ollama 继续工作。
 
-## 为什么 infer 默认按 category 自动（reference 默认 false）
+## infer 永久关闭（2026-06）
 
-`infer=true` 让 mem0 调用 LLM 对输入内容做"推断抽取"——提取核心意图、去重合并后存储。看起来更智能，但在实际使用中问题很大：
+`infer=true` 让 mem0 调用 LLM 做「推断抽取」，在实际使用中问题很大：
 
-### infer=true 的三大风险
+1. **信息丢失**：模块名/字段名被泛化，关键词检索命中率暴跌
+2. **语言漂移**：约 30% 记忆被翻译成英文（本地 Ollama 更明显）
+3. **过度拆分**：三 provider 均不可靠，产生大量碎片记忆
 
-1. **信息丢失**：LLM 会"总结"而非"保留原文"。技术细节（模块名 `userService`、字段名 `loginType`、权限 ID）会被泛化成"某模块的某字段是字符串"，关键词检索命中率暴跌
-2. **语言漂移**：即使有 C 策略（中文锁定），infer 仍可能将中文翻译为英文。实测中，`infer=true` + Ollama qwen2.5:7b 约有 30% 的记忆被翻译成英文
-3. **格式不可控**：infer 的输出格式依赖 LLM 遵守 prompt 约束，不同模型遵守程度差异极大
+**决策**：所有写入永久 `infer=false`，显式 `true` 亦被忽略。category 仅作分类标签。
 
-### 为什么 reference 类型必须原样入库
+**检索不受影响**：hybrid_search 对 verbatim 入库文本做 embedding，保留标识符反而更利于检索。中文子串匹配问题见 TODO #18，与 infer 无关。
 
-reference 类记忆的核心价值是**精确可检索**。例如：
-
-```
-输入：userService 模块的 loginType 字段必须是字符串类型，传数字会导致登录接口报错
-
-infer=true 输出：登录模块的登录类型应为字符串格式（信息丢失：模块名、字段名、错误场景）
-verbatim 输出：原样保留全文（可按 userService/loginType/登录/字符串 精确命中）
-```
-
-### 偏好/行为类为什么可以 infer
-
-这类记忆的核心是**意图**而非**细节**：
-- "我喜欢简洁的回答，不要总结" → infer 提取为 "偏好：简洁回复风格"
-- 即便丢失了一些措辞细节，核心意图不变，检索仍有效
-
-### 推荐策略
-
-| 场景 | infer | 原因 |
-|------|-------|------|
-| 技术约定/决策/bug记录 | `false` | 保留精确标识符 |
-| 偏好/习惯/行为 | 留空(自动true) | 提取核心意图即可 |
-| 项目级约定 | `false` | 项目名/字段名不可泛化 |
-
-## 本地 LLM vs 远程 LLM 实测对比
+### 本地 LLM vs 远程 LLM（E 策略 merge 去重）
 
 以下基于实际使用中的对比观察（本地 Ollama qwen2.5:7b vs 远程 API glm-5.1/claude-sonnet）：
 
@@ -222,8 +229,8 @@ verbatim 输出：原样保留全文（可按 userService/loginType/登录/字�
 ### 实际建议
 
 - **生产环境**：主配置用远程 API，备用配置用本地 Ollama（LLM 兜底机制自动切换）
-- **纯本地环境**：建议对 reference 类严格 `infer=false`，避免本地模型的 infer 质量问题
-- **混合方案**：嵌入始终用本地 Ollama bge-m3（无需 API，效果稳定），LLM 按场景选择
+- **写入**：全部 `infer=false`，AI 写什么存什么
+- **混合方案**：嵌入始终用本地 Ollama bge-m3（无需 API，效果稳定），LLM 仅用于 E 策略 merge 去重
 
 ## 已知限制
 
