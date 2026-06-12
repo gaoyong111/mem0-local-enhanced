@@ -16,7 +16,16 @@ CHROMA_DB_PATH = os.path.expanduser('~/.mem0/chroma_db')
 
 DEFAULT_TOP_K = 15
 DEFAULT_MAX_RESULTS = 5
-MIN_VECTOR_SCORE = 0.35
+RRF_RECALL_TOP_K = 50
+
+# 加权 RRF：score = 1/(K+vec_rank) + α·1/(K+kw_rank) [+ β 双路都命中]
+RRF_K = 15
+RRF_KW_WEIGHT = 0.5
+RRF_BOTH_BONUS = 0.008
+
+# Phase 3 lang 分轨：中文 query 排除纯英文记忆
+_CJK_RE = re.compile(r'[一-鿿]')
+LANG_VECTOR_OVERSAMPLE = 4
 
 GENERIC_DIR_NAMES = frozenset({
     'Desktop', 'Documents', 'Home', 'home', 'Downloads', 'src', 'code', 'projects', 'tmp',
@@ -71,6 +80,36 @@ def detect_project(cwd: str | None = None) -> str:
     if name in GENERIC_DIR_NAMES:
         return ''
     return name
+
+
+def query_has_cjk(text: str) -> bool:
+    """判定 query 是否含中文汉字（CJK 表意文字）。"""
+    return bool(_CJK_RE.search(text or ''))
+
+
+def infer_memory_lang(text: str) -> str:
+    """推断记忆语言：含中文→zh，纯英文→en（infer 时代碎片，中文 query 时过滤）。"""
+    value = (text or '').strip()
+    if not value:
+        return 'zh'
+    if _CJK_RE.search(value):
+        return 'zh'
+    return 'en'
+
+
+def resolve_memory_lang(text: str, metadata_lang: str = '') -> str:
+    """优先用 metadata.lang，缺失时按正文临时推断。"""
+    stored = (metadata_lang or '').strip().lower()
+    if stored in ('zh', 'en', 'mixed'):
+        return stored
+    return infer_memory_lang(text)
+
+
+def should_exclude_lang_en(query: str, text: str, metadata_lang: str = '') -> bool:
+    """中文 query 时排除 lang=en 的记忆；mixed/zh 保留。"""
+    if not query_has_cjk(query):
+        return False
+    return resolve_memory_lang(text, metadata_lang) == 'en'
 
 
 def extract_keywords(query: str) -> list[str]:
@@ -152,11 +191,17 @@ def _load_memory_metadata() -> dict[str, dict[str, str]]:
         metadata_map[memory_id] = {
             'project': str(meta.get('project', '') or ''),
             'category': str(meta.get('category', '') or ''),
+            'lang': str(meta.get('lang', '') or ''),
         }
     return metadata_map
 
 
-def keyword_search(query: str, top_k: int = DEFAULT_TOP_K) -> list[dict[str, Any]]:
+def keyword_search(
+    query: str,
+    top_k: int = DEFAULT_TOP_K,
+    *,
+    filter_lang_en: bool = False,
+) -> list[dict[str, Any]]:
     """关键词匹配 history 最终记忆文本。"""
     keywords = extract_keywords(query)
     if not keywords:
@@ -167,6 +212,10 @@ def keyword_search(query: str, top_k: int = DEFAULT_TOP_K) -> list[dict[str, Any
     scored: list[dict[str, Any]] = []
 
     for memory_id, text in final_memories.items():
+        meta = metadata_map.get(memory_id, {})
+        if filter_lang_en and should_exclude_lang_en(query, text, meta.get('lang', '')):
+            continue
+
         score = 0.0
         text_lower = text.lower()
         for keyword in keywords:
@@ -179,21 +228,28 @@ def keyword_search(query: str, top_k: int = DEFAULT_TOP_K) -> list[dict[str, Any
         if score <= 0:
             continue
 
-        meta = metadata_map.get(memory_id, {})
         scored.append({
             'id': memory_id,
             'text': text,
+            'keyword_score': score,
+            'vector_score': 0.0,
             'score': score,
             'source': 'keyword',
             'project': meta.get('project', ''),
             'category': meta.get('category', ''),
+            'lang': meta.get('lang', '') or infer_memory_lang(text),
         })
 
     scored.sort(key=lambda item: item['score'], reverse=True)
     return scored[:top_k]
 
 
-def vector_search(query: str, top_k: int = DEFAULT_TOP_K) -> list[dict[str, Any]]:
+def vector_search(
+    query: str,
+    top_k: int = DEFAULT_TOP_K,
+    *,
+    filter_lang_en: bool = False,
+) -> list[dict[str, Any]]:
     """Ollama embedding + Chroma 向量检索。"""
     try:
         config = _load_config()
@@ -217,9 +273,18 @@ def vector_search(query: str, top_k: int = DEFAULT_TOP_K) -> list[dict[str, Any]
 
         client = chromadb.PersistentClient(path=CHROMA_DB_PATH)
         collection = client.get_collection('mem0')
+
+        n_results = top_k
+        if filter_lang_en:
+            try:
+                total = collection.count()
+                n_results = min(max(top_k * LANG_VECTOR_OVERSAMPLE, top_k), total)
+            except Exception:
+                n_results = top_k * LANG_VECTOR_OVERSAMPLE
+
         raw = collection.query(
             query_embeddings=[query_vector],
-            n_results=top_k,
+            n_results=n_results,
             include=['metadatas', 'distances'],
         )
 
@@ -234,21 +299,52 @@ def vector_search(query: str, top_k: int = DEFAULT_TOP_K) -> list[dict[str, Any]
             distance = dists_list[0][index] if index < len(dists_list[0]) else 1.0
             score = 1.0 - distance / 2.0
             data_text = (meta or {}).get('data', '')
-            if not data_text or score < MIN_VECTOR_SCORE:
+            if not data_text:
                 continue
+
+            lang = resolve_memory_lang(data_text, str((meta or {}).get('lang', '') or ''))
+            if filter_lang_en and lang == 'en':
+                continue
+
             results.append({
                 'id': memory_id,
                 'text': data_text,
+                'keyword_score': 0.0,
+                'vector_score': score,
                 'score': score,
                 'source': 'vector',
                 'project': (meta or {}).get('project', '') or '',
                 'category': (meta or {}).get('category', '') or '',
+                'lang': lang,
             })
+            if len(results) >= top_k:
+                break
 
         results.sort(key=lambda item: item['score'], reverse=True)
-        return results
+        return results[:top_k]
     except Exception:
         return []
+
+
+def _rrf_term(rank: int, weight: float = 1.0) -> float:
+    """单路 RRF 贡献；rank=0 表示该路未命中。"""
+    if rank <= 0:
+        return 0.0
+    return weight / (RRF_K + rank)
+
+
+def _normalize_source(source: str) -> str:
+    """统一 source 标签（兼容旧 keyword+vector）。"""
+    if source == 'keyword+vector':
+        return 'both'
+    return source
+
+
+def _attach_rank(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """为排序后的结果附加 1-based rank。"""
+    for index, item in enumerate(results, start=1):
+        item['rank'] = index
+    return results
 
 
 def merge_and_rank(
@@ -257,41 +353,66 @@ def merge_and_rank(
     project: str = '',
     max_results: int = DEFAULT_MAX_RESULTS,
 ) -> list[dict[str, Any]]:
-    """合并关键词与向量结果，项目记忆优先。"""
+    """加权 RRF 合并两路排名，保留 keyword_score / vector_score 分离展示。"""
     project = normalize_project(project)
-    seen: dict[str, dict[str, Any]] = {}
+
+    kw_rank_map = {item['id']: rank for rank, item in enumerate(keyword_results, start=1)}
+    vec_rank_map = {item['id']: rank for rank, item in enumerate(vector_results, start=1)}
+    kw_item_map = {item['id']: item for item in keyword_results}
+    vec_item_map = {item['id']: item for item in vector_results}
+
     merged: list[dict[str, Any]] = []
+    for memory_id in set(kw_rank_map) | set(vec_rank_map):
+        kw_rank = kw_rank_map.get(memory_id, 0)
+        vec_rank = vec_rank_map.get(memory_id, 0)
+        kw_item = kw_item_map.get(memory_id)
+        vec_item = vec_item_map.get(memory_id)
+        base = kw_item or vec_item or {}
 
-    for item in keyword_results:
-        memory_id = item['id']
-        if memory_id not in seen:
-            seen[memory_id] = item
-            merged.append(item)
+        keyword_score = float((kw_item or {}).get('keyword_score', (kw_item or {}).get('score', 0)) or 0)
+        vector_score = float((vec_item or {}).get('vector_score', (vec_item or {}).get('score', 0)) or 0)
 
-    for item in vector_results:
-        memory_id = item['id']
-        if memory_id not in seen:
-            seen[memory_id] = item
-            merged.append(item)
+        rrf_score = _rrf_term(vec_rank) + _rrf_term(kw_rank, RRF_KW_WEIGHT)
+        if kw_rank > 0 and vec_rank > 0:
+            rrf_score += RRF_BOTH_BONUS
+            source = 'both'
+        elif kw_rank > 0:
+            source = 'keyword'
         else:
-            existing = seen[memory_id]
-            existing['score'] = existing['score'] + item['score'] * 0.5
-            existing['source'] = 'keyword+vector'
+            source = 'vector'
 
-    merged.sort(key=lambda item: item['score'], reverse=True)
+        merged.append({
+            **base,
+            'id': memory_id,
+            'keyword_score': keyword_score,
+            'vector_score': vector_score,
+            'keyword_rank': kw_rank,
+            'vector_rank': vec_rank,
+            'score': rrf_score,
+            'source': source,
+        })
+
+    merged.sort(
+        key=lambda item: (
+            -float(item.get('score', 0) or 0),
+            item.get('vector_rank') or 9999,
+            item.get('keyword_rank') or 9999,
+            item.get('id', ''),
+        ),
+    )
 
     if not project:
-        return merged[:max_results]
+        return _attach_rank(merged[:max_results])
 
     project_items = [item for item in merged if _project_matches(item.get('project', ''), project)]
     global_items = [item for item in merged if not _project_matches(item.get('project', ''), project)]
 
     # 指定 project 但检索结果里没有该项目记忆时，退回全量 Top-N（避免只剩 2 条全局）
     if not project_items:
-        return merged[:max_results]
+        return _attach_rank(merged[:max_results])
 
     final = project_items[:max(3, max_results - 2)] + global_items[:2]
-    return final[:max_results]
+    return _attach_rank(final[:max_results])
 
 
 def hybrid_search(
@@ -306,8 +427,10 @@ def hybrid_search(
     if not query:
         return []
 
-    keyword_results = keyword_search(query, top_k=top_k)
-    vector_results = vector_search(query, top_k=top_k)
+    recall_k = max(top_k, RRF_RECALL_TOP_K)
+    filter_lang_en = query_has_cjk(query)
+    keyword_results = keyword_search(query, top_k=recall_k, filter_lang_en=filter_lang_en)
+    vector_results = vector_search(query, top_k=recall_k, filter_lang_en=filter_lang_en)
     return merge_and_rank(
         keyword_results,
         vector_results,
@@ -328,14 +451,45 @@ def format_results_lines(
     for item in results:
         project = item.get('project', '')
         scope_tag = f'[{project}]' if project else '[全局]'
-        source = item.get('source', '')
-        score = item.get('score', 0)
+        source = _normalize_source(item.get('source', ''))
         text = item.get('text', '')
-        if isinstance(score, (int, float)) and score > 0:
-            lines.append(f'- {scope_tag} ({source}) {text} (相关度:{score:.2f})')
-        else:
-            lines.append(f'- {scope_tag} ({source}) {text}')
+        rank = item.get('rank', '')
+        rank_prefix = f'#{rank} ' if rank else ''
+        lines.append(f'- {rank_prefix}{scope_tag} ({source}) {text}')
     return '\n'.join(lines)
+
+
+def backfill_lang_metadata(*, dry_run: bool = False) -> dict[str, int]:
+    """一次性给 Chroma 存量记忆写入 metadata.lang（zh/en）。"""
+    try:
+        import chromadb
+    except ImportError:
+        return {'error': 1}
+
+    client = chromadb.PersistentClient(path=CHROMA_DB_PATH)
+    collection = client.get_collection('mem0')
+    raw = collection.get(include=['metadatas'])
+    ids = raw.get('ids') or []
+    metas = raw.get('metadatas') or []
+
+    stats: dict[str, int] = {'total': 0, 'updated': 0, 'skipped': 0, 'zh': 0, 'en': 0}
+    for memory_id, meta in zip(ids, metas):
+        meta = dict(meta or {})
+        text = str(meta.get('data', '') or '')
+        lang = infer_memory_lang(text)
+        stats['total'] += 1
+        stats[lang] = stats.get(lang, 0) + 1
+
+        if meta.get('lang') == lang:
+            stats['skipped'] += 1
+            continue
+
+        meta['lang'] = lang
+        if not dry_run:
+            collection.update(ids=[memory_id], metadatas=[meta])
+        stats['updated'] += 1
+
+    return stats
 
 
 def format_mcp_search_output(results: list[dict[str, Any]]) -> str:
@@ -347,10 +501,18 @@ def format_mcp_search_output(results: list[dict[str, Any]]) -> str:
     for item in results:
         project = item.get('project', '')
         scope_tag = f'[{project}]' if project else '[全局]'
-        score = item.get('score', 0)
-        source = item.get('source', '')
-        score_text = f' score={score:.2f}' if isinstance(score, (int, float)) else ''
+        source = _normalize_source(item.get('source', ''))
+        rank = item.get('rank', '')
+        keyword_score = float(item.get('keyword_score', 0) or 0)
+        vector_score = float(item.get('vector_score', 0) or 0)
+        rrf_score = float(item.get('score', 0) or 0)
+        kw_rank = int(item.get('keyword_rank', 0) or 0)
+        vec_rank = int(item.get('vector_rank', 0) or 0)
+        rank_prefix = f'#{rank} ' if rank else ''
         lines.append(
-            f"[{item.get('id', '')}] {scope_tag} ({source}){score_text} {item.get('text', '')}"
+            f'{rank_prefix}[{item.get("id", "")}] {scope_tag} ({source}) '
+            f'kw={keyword_score:.2f} vec={vector_score:.2f} '
+            f'kw_rank={kw_rank} vec_rank={vec_rank} rrf={rrf_score:.4f} '
+            f'{item.get("text", "")}'
         )
     return '\n'.join(lines)

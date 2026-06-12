@@ -214,6 +214,14 @@ def apply_category_metadata(meta: dict[str, Any]) -> dict[str, Any]:
     return meta
 
 
+def apply_lang_metadata(meta: dict[str, Any], content: str) -> dict[str, Any]:
+    """写入前自动推断 metadata.lang（含中文→zh，纯英文→en）。"""
+    from hybrid_search import infer_memory_lang
+
+    meta['lang'] = infer_memory_lang(content)
+    return meta
+
+
 def should_use_infer(metadata: dict[str, Any], infer_flag: str) -> bool:
     """infer 已永久关闭；显式 true 亦忽略。category 仅作标签，不触发推断抽取。"""
     flag = (infer_flag or '').strip().lower()
@@ -250,6 +258,7 @@ def prepare_add_plan(
             meta['keywords'] = ','.join(keywords)
         apply_category_metadata(meta)
         apply_lineage_metadata(meta)
+        apply_lang_metadata(meta, canonical)
         return AddPlan(
             content=canonical,
             metadata=meta,
@@ -264,6 +273,7 @@ def prepare_add_plan(
     meta['storage_mode'] = meta.get('storage_mode') or 'verbatim'
     apply_category_metadata(meta)
     apply_lineage_metadata(meta)
+    apply_lang_metadata(meta, content.strip())
     return AddPlan(
         content=content.strip(),
         metadata=meta,

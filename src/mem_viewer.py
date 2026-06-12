@@ -304,7 +304,7 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
   .search-result-item:hover { border-color:#3498db; }
   .search-result-item.dimmed { opacity:0.45; }
   .search-result-rank { font-size:12px; color:#3498db; min-width:28px; font-weight:600; }
-  .search-result-score { font-size:12px; color:#f39c12; min-width:110px; white-space:nowrap; }
+  .search-result-score { font-size:12px; color:#f39c12; min-width:130px; white-space:nowrap; line-height:1.35; }
   .search-result-text { font-size:13px; color:#e0e0e0; line-height:1.5; flex:1; }
   .search-result-meta { font-size:11px; color:#95a5a6; margin-top:4px; }
 
@@ -613,7 +613,12 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
       const scopeTag = item.project ? ('[' + item.project + ']') : '[全局]';
       row.innerHTML =
         '<div class="search-result-rank">#' + (index + 1) + '</div>' +
-        '<div class="search-result-score">score=' + Number(item.score).toFixed(2) + '<br>(' + (item.source || 'unknown') + ')</div>' +
+        '<div class="search-result-score">' +
+          'kw=' + Number(item.keyword_score || 0).toFixed(2) + '<br>' +
+          'vec=' + Number(item.vector_score || 0).toFixed(2) + '<br>' +
+          'rank=' + Number(item.score || 0).toFixed(2) + '<br>' +
+          '(' + (item.source || 'unknown') + ')' +
+        '</div>' +
         '<div class="search-result-text">' +
           item.text +
           '<div class="search-result-meta">' + scopeTag + ' · ' + item.id +
@@ -853,6 +858,9 @@ def search():
     for item in results:
         payload.append({
             'id': item.get('id', ''),
+            'rank': int(item.get('rank', 0) or 0),
+            'keyword_score': round(float(item.get('keyword_score', 0) or 0), 2),
+            'vector_score': round(float(item.get('vector_score', 0) or 0), 2),
             'score': round(float(item.get('score', 0) or 0), 2),
             'source': item.get('source', ''),
             'project': item.get('project', '') or '',
