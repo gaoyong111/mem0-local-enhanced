@@ -24,6 +24,7 @@ from mem0_add_policy import (  # noqa: E402
     CATEGORY_COLORS,
     CATEGORY_LABELS,
     VALID_CATEGORIES,
+    apply_category_metadata,
     normalize_category,
 )
 from memory_lineage import build_timeline, record_event  # noqa: E402
@@ -44,37 +45,32 @@ _GLOBAL_COLOR = '#95a5a6'
 
 
 def load_all_memories() -> list[dict]:
-    """从 history.db 和 ChromaDB 合并加载全部记忆，包含变更厚度。"""
+    """从 active_memories + Chroma 加载全部活跃记忆。"""
+    from memory_sync import load_active_memories, load_active_metadata, migrate_active_if_needed
+
+    migrate_active_if_needed()
+    text_map = load_active_memories()
+    metadata_map = load_active_metadata()
+
+    created_at_map: dict[str, str] = {}
+    conn = sqlite3.connect(os.path.expanduser('~/.mem0/active_memories.db'))
+    try:
+        for memory_id, created_at, updated_at in conn.execute(
+            'SELECT memory_id, created_at, updated_at FROM active_memories'
+        ):
+            created_at_map[memory_id] = created_at or updated_at or ''
+    finally:
+        conn.close()
+
+    update_count_map: dict[str, int] = {}
     conn = sqlite3.connect(HISTORY_DB)
     try:
-        deleted_rows = conn.execute(
-            "SELECT DISTINCT memory_id FROM history WHERE event = 'DELETE' AND memory_id IS NOT NULL"
-        ).fetchall()
-        deleted_ids = {row[0] for row in deleted_rows if row[0]}
-
-        rows = conn.execute(
-            "SELECT memory_id, new_memory, old_memory, created_at FROM history WHERE is_deleted = 0 ORDER BY created_at DESC"
-        ).fetchall()
-
-        # 变更厚度：统计每个 memory_id 的 UPDATE 事件数
         update_rows = conn.execute(
             "SELECT memory_id, count(*) FROM history WHERE event = 'UPDATE' AND is_deleted = 0 GROUP BY memory_id"
         ).fetchall()
         update_count_map = {row[0]: row[1] for row in update_rows if row[0]}
     finally:
         conn.close()
-
-    text_map: dict[str, str] = {}
-    created_at_map: dict[str, str] = {}
-    for memory_id, new_memory, old_memory, created_at in rows:
-        if not memory_id or memory_id in deleted_ids:
-            continue
-        text = (new_memory or old_memory or '').strip()
-        if text and memory_id not in text_map:
-            text_map[memory_id] = text
-            created_at_map[memory_id] = created_at or ''
-
-    metadata_map = _load_chroma_metadata()
 
     memories = []
     for memory_id, text in text_map.items():
@@ -304,7 +300,7 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
   .search-result-item:hover { border-color:#3498db; }
   .search-result-item.dimmed { opacity:0.45; }
   .search-result-rank { font-size:12px; color:#3498db; min-width:28px; font-weight:600; }
-  .search-result-score { font-size:12px; color:#f39c12; min-width:130px; white-space:nowrap; line-height:1.35; }
+  .search-result-score { font-size:12px; color:#f39c12; min-width:110px; white-space:nowrap; }
   .search-result-text { font-size:13px; color:#e0e0e0; line-height:1.5; flex:1; }
   .search-result-meta { font-size:11px; color:#95a5a6; margin-top:4px; }
 
@@ -323,6 +319,12 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
   .timeline-item .tl-head { font-size:12px; color:#3498db; margin-bottom:4px; }
   .timeline-item .tl-body { font-size:12px; color:#bdc3c7; line-height:1.5; white-space:pre-wrap; }
   .timeline-link { color:#f39c12; cursor:pointer; text-decoration:underline; }
+  .detail-edit-row { display:flex; flex-direction:column; gap:8px; margin-bottom:8px; }
+  .detail-edit-row input, .detail-edit-row select { width:100%; padding:6px 10px; border-radius:6px; border:1px solid #0f3460; background:#1a1a2e; color:#e0e0e0; font-size:13px; }
+  .detail-edit-row input:focus, .detail-edit-row select:focus { outline:none; border-color:#3498db; }
+  .btn-save { margin-top:4px; padding:6px 14px; background:#2ecc71; color:#fff; border:none; border-radius:6px; cursor:pointer; font-size:13px; }
+  .btn-save:hover { opacity:0.8; }
+  .btn-save:disabled { opacity:0.5; cursor:not-allowed; }
   .btn-delete { margin-top:16px; padding:8px 16px; background:#e74c3c; color:#fff; border:none; border-radius:6px; cursor:pointer; font-size:13px; }
   .btn-delete:hover { opacity:0.8; }
 
@@ -408,7 +410,16 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
     </div>
     <div class="detail-section">
       <div class="detail-label">项目 / 分类</div>
-      <div class="detail-meta" id="detail-scope"></div>
+      <div class="detail-edit-row">
+        <input type="text" id="edit-project" placeholder="留空 = 全局" />
+        <select id="edit-category">
+          {% for cat, label in category_items %}
+          <option value="{{ cat }}">{{ label }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="detail-meta" id="detail-created"></div>
+      <button class="btn-save" id="btn-save" onclick="saveMetadata()">保存</button>
     </div>
     <div class="detail-section">
       <div class="detail-label">演变时间线</div>
@@ -477,11 +488,11 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
     const thick = thicknessMap[id] || {};
     document.getElementById('detail-title').textContent = mem.project ? '[' + mem.project + ']' : '[全局]';
     document.getElementById('detail-text').textContent = mem.text;
-    document.getElementById('detail-scope').textContent =
-      '项目: ' + (mem.project || '全局') +
-      ' | 分类: ' + (mem.category_label || mem.category || '未知') +
-      (mem.category_raw && mem.category_raw !== mem.category ? ' (原:' + mem.category_raw + ')' : '') +
-      ' | 创建: ' + (mem.created_at || '未知');
+    document.getElementById('edit-project').value = mem.project || '';
+    document.getElementById('edit-category').value = mem.category || 'episodic';
+    document.getElementById('detail-created').textContent =
+      '创建: ' + (mem.created_at || '未知') +
+      (mem.category_raw && mem.category_raw !== mem.category ? ' | 原分类: ' + mem.category_raw : '');
     document.getElementById('detail-meta').textContent = JSON.stringify(mem.metadata, null, 2);
     const changeEmoji = thick.change >= 2 ? '★' : thick.change === 1 ? '◆' : '●';
     document.getElementById('detail-thickness').textContent =
@@ -613,12 +624,7 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
       const scopeTag = item.project ? ('[' + item.project + ']') : '[全局]';
       row.innerHTML =
         '<div class="search-result-rank">#' + (index + 1) + '</div>' +
-        '<div class="search-result-score">' +
-          'kw=' + Number(item.keyword_score || 0).toFixed(2) + '<br>' +
-          'vec=' + Number(item.vector_score || 0).toFixed(2) + '<br>' +
-          'rank=' + Number(item.score || 0).toFixed(2) + '<br>' +
-          '(' + (item.source || 'unknown') + ')' +
-        '</div>' +
+        '<div class="search-result-score">score=' + Number(item.score).toFixed(2) + '<br>(' + (item.source || 'unknown') + ')</div>' +
         '<div class="search-result-text">' +
           item.text +
           '<div class="search-result-meta">' + scopeTag + ' · ' + item.id +
@@ -753,10 +759,89 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
     updateStats();
   }
 
+  function saveMetadata() {
+    if (!selectedId) return;
+    const mem = memoriesMap[selectedId];
+    if (!mem) return;
+
+    const project = document.getElementById('edit-project').value.trim();
+    const category = document.getElementById('edit-category').value;
+    const payload = {};
+    if (project !== (mem.project || '')) payload.project = project;
+    if (category !== mem.category) payload.category = category;
+    if (Object.keys(payload).length === 0) {
+      alert('无变更');
+      return;
+    }
+
+    const btn = document.getElementById('btn-save');
+    btn.disabled = true;
+    btn.textContent = '保存中...';
+
+    fetch('/api/update/' + encodeURIComponent(selectedId), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    })
+      .then(r => r.json())
+      .then(result => {
+        btn.disabled = false;
+        btn.textContent = '保存';
+        if (!result.ok) {
+          alert('保存失败: ' + (result.error || '未知错误'));
+          return;
+        }
+        if (!result.changed) {
+          alert('无变更');
+          return;
+        }
+
+        mem.project = result.project || '';
+        mem.category = result.category || mem.category;
+        mem.category_label = result.category_label || mem.category_label;
+        mem.category_raw = result.category_raw || '';
+        if (mem.metadata) {
+          mem.metadata.project = mem.project;
+          mem.metadata.category = mem.category;
+          if (mem.category_raw) {
+            mem.metadata.category_raw = mem.category_raw;
+          }
+        }
+
+        const nodeColor = {{ category_colors_json | safe }}[mem.category] || '{{ global_color }}';
+        nodes.update({
+          id: selectedId,
+          color: nodeColor,
+          title: (mem.project ? '[' + mem.project + '] ' : '[全局] ') +
+            mem.text.slice(0, 60) + (mem.text.length > 60 ? '...' : ''),
+        });
+        originalNodeColors[selectedId] = nodeColor;
+
+        showDetail(selectedId);
+        loadTimeline(selectedId);
+      })
+      .catch(err => {
+        btn.disabled = false;
+        btn.textContent = '保存';
+        console.error('save failed', err);
+        alert('保存失败，请重试');
+      });
+  }
+
   function deleteMemory() {
     if (!selectedId) return;
-    if (!confirm('确认删除记忆 ' + selectedId + '？')) return;
-    fetch('/delete/' + selectedId, { method: 'POST' })
+    const reason = prompt('请填写删除原因（必填，便于追溯）：');
+    if (reason === null) return;
+    if (!reason.trim()) {
+      alert('必须填写删除原因');
+      return;
+    }
+    if (!confirm('确认删除记忆 ' + selectedId + '？\n原因：' + reason.trim())) return;
+    fetch('/delete/' + selectedId, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ reason: reason.trim() }),
+    })
       .then(r => r.json())
       .then(result => {
         if (result.ok) {
@@ -815,6 +900,7 @@ def index():
 
     projects = sorted(set(m['project'] for m in memories if m['project']))
     category_items = [(cat, CATEGORY_LABELS[cat]) for cat in sorted(VALID_CATEGORIES)]
+    category_colors_json = json.dumps(CATEGORY_COLORS, ensure_ascii=False)
 
     return render_template_string(
         HTML_TEMPLATE,
@@ -825,6 +911,7 @@ def index():
         projects=projects,
         category_items=category_items,
         category_colors=CATEGORY_COLORS,
+        category_colors_json=category_colors_json,
         vis_js_cdn=VIS_JS_CDN,
         global_color=_GLOBAL_COLOR,
         mcp_search_max_results=MCP_SEARCH_MAX_RESULTS,
@@ -858,9 +945,6 @@ def search():
     for item in results:
         payload.append({
             'id': item.get('id', ''),
-            'rank': int(item.get('rank', 0) or 0),
-            'keyword_score': round(float(item.get('keyword_score', 0) or 0), 2),
-            'vector_score': round(float(item.get('vector_score', 0) or 0), 2),
             'score': round(float(item.get('score', 0) or 0), 2),
             'source': item.get('source', ''),
             'project': item.get('project', '') or '',
@@ -876,35 +960,136 @@ def search():
     })
 
 
+def update_memory_metadata(
+    memory_id: str,
+    *,
+    project: str | None = None,
+    category: str | None = None,
+) -> dict:
+    """更新 Chroma metadata 中的 project/category，不重算向量。"""
+    import chromadb
+
+    client = chromadb.PersistentClient(path=CHROMA_DB_PATH)
+    col = client.get_collection('mem0')
+    result = col.get(ids=[memory_id], include=['metadatas'])
+    ids = result.get('ids') or []
+    if not ids:
+        raise ValueError(f'记忆不存在: {memory_id}')
+
+    old_meta = dict((result.get('metadatas') or [{}])[0] or {})
+    new_meta = dict(old_meta)
+    changes: list[tuple[str, str, str]] = []
+
+    if project is not None:
+        old_project = normalize_project(str(old_meta.get('project', '') or ''))
+        new_project = normalize_project(project)
+        if old_project != new_project:
+            new_meta['project'] = new_project
+            changes.append(('project', old_project, new_project))
+
+    if category is not None:
+        old_category = normalize_category(str(old_meta.get('category', '') or ''))
+        new_meta['category'] = category
+        apply_category_metadata(new_meta)
+        new_category = normalize_category(new_meta.get('category', ''))
+        if old_category != new_category:
+            changes.append(('category', old_category, new_category))
+
+    if not changes:
+        normalized_project = normalize_project(str(new_meta.get('project', '') or ''))
+        normalized_category = normalize_category(str(new_meta.get('category', '') or ''))
+        return {
+            'changed': False,
+            'project': normalized_project,
+            'category': normalized_category,
+            'category_label': CATEGORY_LABELS.get(normalized_category, normalized_category),
+            'category_raw': str(new_meta.get('category_raw', '') or ''),
+        }
+
+    col.update(ids=[memory_id], metadatas=[new_meta])
+
+    from memory_sync import sync_active_update_meta
+
+    sync_active_update_meta(
+        memory_id,
+        project=normalize_project(str(new_meta.get('project', '') or '')) if project is not None else None,
+        category=normalize_category(str(new_meta.get('category', '') or '')) if category is not None else None,
+    )
+
+    for field, old_val, new_val in changes:
+        if field == 'category':
+            record_event(
+                'CATEGORY_CHANGE',
+                memory_id,
+                category=new_val,
+                note=f'{old_val} → {new_val}',
+                actor='mem_viewer',
+            )
+        elif field == 'project':
+            record_event(
+                'GROOMING',
+                memory_id,
+                note=f'project: {old_val or "全局"} → {new_val or "全局"}',
+                actor='mem_viewer',
+            )
+
+    normalized_project = normalize_project(str(new_meta.get('project', '') or ''))
+    normalized_category = normalize_category(str(new_meta.get('category', '') or ''))
+    return {
+        'changed': True,
+        'project': normalized_project,
+        'category': normalized_category,
+        'category_label': CATEGORY_LABELS.get(normalized_category, normalized_category),
+        'category_raw': str(new_meta.get('category_raw', '') or ''),
+    }
+
+
+@app.route('/api/update/<memory_id>', methods=['POST'])
+def update_memory(memory_id: str):
+    """更新记忆的 project/category（仅 metadata，不重嵌向量）。"""
+    body = request.get_json(silent=True) or {}
+    has_project = 'project' in body
+    has_category = 'category' in body
+    if not has_project and not has_category:
+        return jsonify({'ok': False, 'error': '至少提供 project 或 category'}), 400
+
+    project = body.get('project') if has_project else None
+    category = body.get('category') if has_category else None
+    if has_category:
+        normalized = normalize_category(category)
+        if normalized not in VALID_CATEGORIES:
+            return jsonify({'ok': False, 'error': f'无效 category: {category}'}), 400
+
+    try:
+        result = update_memory_metadata(memory_id, project=project, category=category)
+        return jsonify({'ok': True, **result})
+    except ValueError as exc:
+        return jsonify({'ok': False, 'error': str(exc)}), 404
+    except Exception as exc:
+        return jsonify({'ok': False, 'error': str(exc)}), 500
+
+
 @app.route('/delete/<memory_id>', methods=['POST'])
 def delete(memory_id):
-    """删除记忆。直接操作 ChromaDB + history.db，无需 LLM。"""
+    """删除记忆：memory_sync 多表事务 + Chroma。"""
+    from memory_delete import archive_delete
+    from memory_sync import SyncError
+
+    payload = request.get_json(silent=True) or {}
+    reason = str(payload.get('reason', '') or '').strip()
+    if not reason:
+        return jsonify({'ok': False, 'error': '必须填写删除原因（reason）'}), 400
+
     try:
-        # 1. 从 ChromaDB 删除向量
-        import chromadb
-        client = chromadb.PersistentClient(path=CHROMA_DB_PATH)
-        col = client.get_collection('mem0')
-        col.delete(ids=[memory_id])
-
-        # 2. 在 history.db 标记 DELETE 事件
-        conn = sqlite3.connect(HISTORY_DB)
-        try:
-            conn.execute(
-                "INSERT INTO history (id, memory_id, event, is_deleted, created_at) VALUES (?, ?, 'DELETE', 1, ?)",
-                (memory_id + '_del', memory_id, time.strftime('%Y-%m-%dT%H:%M:%S')),
-            )
-            conn.commit()
-        finally:
-            conn.close()
-
-        record_event(
-            'DELETE',
+        result = archive_delete(
             memory_id,
-            note='mem_viewer 删除',
+            reason,
             actor='mem_viewer',
+            source='mem_viewer',
         )
-
-        return jsonify({'ok': True})
+        return jsonify({'ok': True, 'counts': result.get('counts', {})})
+    except SyncError as exc:
+        return jsonify({'ok': False, 'error': str(exc), 'sync_pending': True}), 500
     except Exception as exc:
         return jsonify({'ok': False, 'error': str(exc)})
 

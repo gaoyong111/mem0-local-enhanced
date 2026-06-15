@@ -69,6 +69,34 @@ Chroma metadata 仅支持标量值，嵌套的 `structured` dict 会被序列化
 
 设计原则：宁多勿删。只有当新旧记忆描述的是**同一组事实**且旧记忆已完整覆盖时才选择 `DROP_NEW`。
 
+## 存储分层（方案一，2026-06）
+
+| 库 / 文件 | 职责 | 检索是否读取 |
+|-----------|------|-------------|
+| **`active_memories.db`** | 活跃记忆查询表（正文 + project/category/lang） | **是**（keyword 唯一数据源） |
+| **`history.db`** | 追加式追溯日志（ADD / UPDATE / DELETE 事件） | **否** |
+| **`deleted_archive.db`** | 删除台账（reason / 时间 / 快照 / actor） | **否**（仅提供 deleted_ids） |
+| **Chroma** | 向量 + metadata.data | **是**（vector 路） |
+| **`lineage.jsonl`** | 演变事件（MERGE / DEDUP / DELETE 等） | **否** |
+| **`sync_pending/`** | 多表同步失败待重试（类比 add pending） | **否** |
+
+写入 mem0（Chroma + history ADD）后，MCP 会调用 `sync_active_insert` 同步 **active** 表。删除统一走 `memory_sync.execute_delete`，**必须填写 reason**。
+
+### 多表同步事务（`memory_sync.py`）
+
+删除时期望行数（固定校验）：
+
+| 步骤 | 表 | 期望 |
+|------|-----|------|
+| SQLite 事务 | active DELETE | 1 |
+| SQLite 事务 | deleted_archive INSERT | 1 |
+| SQLite 事务 | history INSERT (DELETE 事件) | 1 |
+| 事务外 | Chroma delete | 1 |
+
+任一步不符 → SQLite **ROLLBACK** 或 Chroma 失败后**还原 active** → 写入 `sync_pending/`。`retry_pending` 末尾会顺带执行 `retry_sync_pending()`。
+
+**注意**：向量写入须带 Ollama 预计算 embedding（`upsert(embeddings=...)`）。勿对 Chroma 使用裸 `col.add(documents=...)`，否则会触发 Chroma 内置 ONNX MiniLM 下载。
+
 ## 混合检索
 
 ### 检索流程
@@ -76,32 +104,25 @@ Chroma metadata 仅支持标量值，嵌套的 `structured` dict 会被序列化
 ```
 用户查询
     │
-    ├── 关键词检索（history.db）
-    │   ├─ 提取中英文关键词
-    │   ├─ 在最终记忆文本中匹配计分
-    │   └─ 返回 top_k 结果
+    ├── 关键词检索（active_memories.db）
+    │   ├─ 中文 2–4 字滑动窗口 + 英文 token 子串匹配
+    │   └─ 返回 top-50 候选
     │
-    ├── 向量检索（Chroma + Ollama）
+    ├── 向量检索（Chroma + Ollama bge-m3）
     │   ├─ Ollama bge-m3 生成查询向量
-    │   ├─ Chroma 向量近邻搜索
-    │   ├─ 过滤 score < 0.35 的低质量结果
-    │   └─ 返回 top_k 结果
+    │   ├─ Chroma cosine 近邻（中文 query 排除 lang=en，oversample×4）
+    │   └─ 返回 top-50 候选
     │
-    └── 合并排序（merge_and_rank）
-        ├─ 去重合并（同一 ID 的关键词+向量结果：final = keyword + vector×0.5）
-        ├─ 项目记忆优先（仅当指定 project 且确有该项目命中时）
-        │   ├─ 项目记忆最多 max(3, max_results-2) 条 + 全局最多 2 条
-        │   └─ **若无该项目命中 → 退回全量 Top-N**（避免只剩 2 条全局）
-        └─ 返回最终结果
+    └── 加权 RRF 融合（merge_and_rank）
+        ├─ rrf = 1/(K+vec_rank) + 0.5·1/(K+kw_rank) [+0.008 双路共识]
+        ├─ K=15；指定 project 时匹配记忆 +0.005 奖励分
+        ├─ 配额：project 前 3 直保 + 全局保底 2；余量按 score 填充
+        └─ 默认返回 top-5（MCP）/ top-8（viewer）
 ```
 
-### 关键词检索与 DELETE 幽灵记忆
+### 关键词数据源
 
-`_load_final_memories()` 从 history.db 构建最终记忆文本时：
-1. 先收集所有 `event=DELETE` 的 memory_id
-2. 再遍历 ADD/UPDATE 行，**排除**已 DELETE 的 id
-
-避免 mem0 删除后 ADD 行仍 `is_deleted=0` 导致关键词检索出现「幽灵记忆」。
+`_load_final_memories()` 只读 **`active_memories.db`**，不再扫描 history.db ADD 行。history 仅作追溯；删除过滤由 `deleted_archive.db` 保证 active 中无已删 id。
 
 ### 关键词计分规则
 
@@ -113,12 +134,9 @@ Chroma metadata 仅支持标量值，嵌套的 `structured` dict 会被序列化
 
 - Chroma 返回的是 cosine distance
 - score = 1.0 - distance / 2.0（近似 cosine similarity）
-- 低于 `MIN_VECTOR_SCORE`（0.35）的**向量路**结果被过滤
+- 展示用；排序融合走 RRF rank，不看绝对分阈值
 
-**注意**：最终展示的 `score` 与 `source` 必须一起看：
-- `keyword`：子串命中累加（2～30+），高分≠语义相关
-- `vector`：仅 embedding 距离（小库常全在 0.71～0.87），0.35 阈值在小规模库上几乎不过滤
-- `keyword+vector`：两路合并分，不可当作 0～1 的相关度百分比
+**注意**：MCP 输出 `kw=` / `vec=` / `kw_rank` / `vec_rank` / `rrf=` / 可选 `proj=`，不可把 keyword 分当作 0～1 语义相关度。
 
 mem_viewer 搜索面板与 MCP 使用同一 `hybrid_search`（max=8），展示 rank / score / source 便于对比。
 
@@ -156,8 +174,8 @@ mem_viewer 搜索面板与 MCP 使用同一 `hybrid_search`（max=8），展示 
 | `add_memory` | 添加记忆，支持 metadata/project/infer 参数，自动执行写入策略 |
 | `search_memory` | 混合检索，支持 project 限定范围 |
 | `get_all_memories` | 获取所有记忆，支持 project 限定范围 |
-| `delete_memory` | 删除指定 ID 的记忆 |
-| `retry_pending` | 扫描 `~/.mem0/pending/` 批量重试失败写入；≥3 次标记 `manual_review` |
+| `delete_memory` | 删除指定 ID（**reason 必填**），多表事务同步 |
+| `retry_pending` | 重试 `pending/` 写入失败 + `sync_pending/` 同步失败 |
 
 ## 三层记忆注入
 
@@ -175,12 +193,17 @@ add 失败时 MCP 写入 `~/.mem0/pending/*.json`（与复盘兜底**同一路�
 
 复盘 cron 或 `retry_pending` 工具负责重试。详见 → [daily-review-integration.md](daily-review-integration.md)
 
+## sync_pending 同步兜底
+
+多表写入/删除失败时写入 `~/.mem0/sync_pending/*.json`（`op`、`memory_id`、`reason`、`expected`、`actual`、`failed_step` 等）。`retry_sync_pending()` 由 `retry_pending` 顺带调用；≥3 次需人工处理。
+
 ## 记忆演变留痕（lineage）
 
 | 数据源 | 记录什么 |
 |--------|----------|
-| `history.db` | mem0 原生 ADD / DELETE（暂无 UPDATE） |
-| `lineage.jsonl` | MERGE（grooming 合并）、DEDUP_DROP（E 去重）、MCP/viewer 删除 |
+| `history.db` | mem0 原生 ADD / UPDATE / DELETE（**仅追溯**，检索不读） |
+| `deleted_archive.db` | 删除 reason / 时间 / 快照 |
+| `lineage.jsonl` | MERGE（grooming 合并）、DEDUP_DROP（E 去重）、DELETE |
 
 grooming 合并写入时 metadata 须带 `merged_from`（来源 ID）。mem_viewer 详情面板「演变时间线」可查看并点击上游 ID。
 
@@ -251,10 +274,10 @@ mem0 的 `AnthropicLLM` provider 不会将 `response_format` 参数传递给底�
 ### 其他限制
 
 - Chroma metadata 仅支持 str/int/float 标量值，嵌套 dict 需序列化为 JSON 字符串
-- history.db 中的 DELETE 事件可能不完整（依赖 mem0 内部行为），keyword_search 通过二次过滤已缓解
+- 多表同步依赖 `memory_sync`；Chroma 不在 SQLite 事务内，极端失败时查 `sync_pending/`
 - Hook 超时默认 20 秒，Ollama 响应慢时可能超时
 - Ollama 未启动时 MCP 无法初始化（embedding 硬依赖 localhost:11434）
-- 中文关键词子串匹配弱（如「下雨」≠「下大雨」），待改进分词/向量权重
+- 中文关键词子串匹配弱（如「下雨」≠「下大雨」），待 #18 条件子序列
 
 ## 相关文档
 

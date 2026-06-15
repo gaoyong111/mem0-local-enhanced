@@ -392,13 +392,14 @@ def run_merge_check(
     if decision.action != 'DROP_NEW':
         return None
 
+    target = decision.target_id or candidates[0].get('id', '')
+    drop_reason = f'去重：与 {target} 重复。{decision.reason or ""}'.strip()
     try:
-        delete_memory(memory_id)
+        delete_memory(memory_id, drop_reason)
     except Exception as error:
         logger.warning('drop duplicate failed %s: %s', memory_id, error)
         return None
 
-    target = decision.target_id or candidates[0].get('id', '')
     try:
         from memory_lineage import record_dedup_drop
 

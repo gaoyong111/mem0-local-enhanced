@@ -60,10 +60,15 @@ def _embed(text: str) -> list[float]:
 
 
 def delete_memory(memory_id: str, note: str = '') -> None:
-    import chromadb
+    from memory_delete import archive_delete
 
-    memory.delete(memory_id)
-    record_event('DELETE', memory_id, note=note or 'english_grooming', actor='english_grooming')
+    reason = (note or '').strip() or 'english_grooming'
+    archive_delete(
+        memory_id,
+        reason,
+        actor='english_grooming',
+        source='english_grooming',
+    )
 
 
 def update_metadata(memory_id: str, patches: dict[str, str]) -> None:
@@ -104,24 +109,16 @@ def replace_text_keep_id(memory_id: str, new_text: str, meta_patches: dict[str, 
         metadatas=[new_meta],
     )
 
-    conn = sqlite3.connect(HISTORY_DB)
-    try:
-        conn.execute(
-            """
-            INSERT INTO history (id, memory_id, old_memory, new_memory, event, created_at, is_deleted)
-            VALUES (?, ?, ?, ?, 'UPDATE', ?, 0)
-            """,
-            (
-                f'{memory_id}_groom_{int(time.time())}',
-                memory_id,
-                old_text,
-                new_text,
-                time.strftime('%Y-%m-%dT%H:%M:%S'),
-            ),
-        )
-        conn.commit()
-    finally:
-        conn.close()
+    sys.path.insert(0, os.path.expanduser('~/.mem0'))
+    from memory_sync import sync_active_update_content
+
+    sync_active_update_content(
+        memory_id,
+        new_text,
+        project=str(new_meta.get('project', '') or ''),
+        category=str(new_meta.get('category', '') or ''),
+        lang=str(new_meta.get('lang', '') or 'zh'),
+    )
 
     record_event(
         'UPDATE',

@@ -62,14 +62,24 @@ def _init_memory(primary_path: str, fallback_path: str) -> Memory:
 _memory = _init_memory(_PRIMARY_CONFIG, _FALLBACK_CONFIG)
 
 
-def _safe_delete(memory_id: str) -> None:
+def _safe_delete(memory_id: str, reason: str = '') -> None:
+    from memory_delete import archive_delete
+
     try:
-        _memory.delete(memory_id)
-    except ValueError as error:
-        if 'not found' not in str(error).lower():
+        archive_delete(
+            memory_id,
+            reason or 'dedup_drop',
+            actor='mcp',
+            source='merge_dedup',
+        )
+    except Exception as error:
+        from memory_sync import SyncError
+
+        if isinstance(error, SyncError):
+            logger.warning('sync delete failed %s: %s', memory_id, error)
+            return
+        if 'not found' not in str(error).lower() and '不能为空' not in str(error):
             raise
-    except IndexError:
-        pass
 
 
 @mcp.tool()
@@ -136,6 +146,23 @@ def add_memory(content: str, metadata: str = '', project: str = '', infer: str =
                 return f'记忆[{scope}]（{mode_note}）与已有记忆重复，未新增。{merge_note}'
 
     if ids and ids[0] != '?':
+        from memory_sync import sync_active_insert
+
+        for item in items:
+            item_id = item.get('id')
+            if not item_id:
+                continue
+            sync_result = sync_active_insert(
+                item_id,
+                plan.content,
+                project=str(plan.metadata.get('project', '') or project or ''),
+                category=str(plan.metadata.get('category', '') or ''),
+                lang=str(plan.metadata.get('lang', '') or 'zh'),
+            )
+            if not sync_result.ok:
+                logger.warning('active 同步失败 %s: %s', item_id, sync_result.detail)
+
+    if ids and ids[0] != '?':
         merged_sources = parse_merged_from(plan.metadata)
         if merged_sources:
             record_merge_result(
@@ -187,17 +214,24 @@ def get_all_memories(project: str = '') -> str:
 
 
 @mcp.tool()
-def delete_memory(memory_id: str) -> str:
-    """删除一条记忆。memory_id为要删除的记忆ID"""
+def delete_memory(memory_id: str, reason: str = '') -> str:
+    """删除一条记忆。memory_id为要删除的记忆ID，reason为删除原因（必填，便于追溯）。"""
+    reason = (reason or '').strip()
+    if not reason:
+        return '删除失败：必须提供 reason（删除原因）'
     try:
-        _memory.delete(memory_id)
-        record_event(
-            'DELETE',
+        from memory_delete import archive_delete
+        from memory_sync import SyncError
+
+        archive_delete(
             memory_id,
-            note='MCP delete_memory',
+            reason,
             actor='mcp',
+            source='delete_memory',
         )
-        return f'已删除记忆 {memory_id}'
+        return f'已删除记忆 {memory_id}，原因：{reason}'
+    except SyncError as error:
+        return f'删除未完全同步（已写入 sync_pending）: {error}'
     except ValueError as error:
         if 'not found' in str(error).lower():
             return f'记忆 {memory_id} 已不存在（可能此前已删除）'
@@ -280,6 +314,14 @@ def retry_pending() -> str:
     lines = [f'重试完成: 成功{success_count}条, 失败{fail_count}条']
     if manual_review:
         lines.append(f'需人工介入: {manual_review}')
+
+    from memory_sync import retry_sync_pending
+
+    sync_lines = retry_sync_pending()
+    if sync_lines:
+        lines.append('--- sync_pending ---')
+        lines.extend(sync_lines)
+
     return '\n'.join(lines)
 
 

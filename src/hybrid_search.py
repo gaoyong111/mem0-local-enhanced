@@ -23,6 +23,11 @@ RRF_K = 15
 RRF_KW_WEIGHT = 0.5
 RRF_BOTH_BONUS = 0.008
 
+# project 配额：RRF 上加匹配奖励分，再 project 前 3 + 全局保底 2
+RRF_PROJECT_BONUS = 0.005
+PROJECT_QUOTA_TOP = 3
+GLOBAL_QUOTA_MIN = 2
+
 # Phase 3 lang 分轨：中文 query 排除纯英文记忆
 _CJK_RE = re.compile(r'[一-鿿]')
 LANG_VECTOR_OVERSAMPLE = 4
@@ -130,49 +135,29 @@ def extract_keywords(query: str) -> list[str]:
     return unique
 
 
-def _load_deleted_memory_ids(conn: sqlite3.Connection) -> set[str]:
-    """mem0 删除时 ADD 行可能仍 is_deleted=0，需以 DELETE 事件为准。"""
-    rows = conn.execute(
-        """
-        SELECT DISTINCT memory_id
-        FROM history
-        WHERE event = 'DELETE' AND memory_id IS NOT NULL
-        """
-    ).fetchall()
-    return {memory_id for memory_id, in rows if memory_id}
+def _load_deleted_memory_ids(conn: sqlite3.Connection | None = None) -> set[str]:
+    """已删除 memory_id 集合；优先读 deleted_archive.db（与 history DELETE 分流）。"""
+    del conn  # 保留签名兼容；deleted_ids 不再扫 history.db
+    from memory_delete import load_deleted_ids
+
+    return load_deleted_ids()
 
 
 def _load_final_memories() -> dict[str, str]:
-    """从 history.db 构建 memory_id -> 最终文本（排除已 DELETE 的记忆）。"""
-    if not os.path.exists(HISTORY_DB):
-        return {}
+    """从 active_memories.db 加载活跃记忆（方案一：history 仅追溯，不参与检索）。"""
+    from memory_sync import load_active_memories
 
-    conn = sqlite3.connect(HISTORY_DB)
-    try:
-        deleted_ids = _load_deleted_memory_ids(conn)
-        rows = conn.execute(
-            """
-            SELECT memory_id, new_memory, old_memory
-            FROM history
-            WHERE is_deleted = 0
-            ORDER BY created_at DESC
-            """
-        ).fetchall()
-    finally:
-        conn.close()
-
-    final: dict[str, str] = {}
-    for memory_id, new_memory, old_memory in rows:
-        if not memory_id or memory_id in deleted_ids:
-            continue
-        text = (new_memory or old_memory or '').strip()
-        if text and memory_id not in final:
-            final[memory_id] = text
-    return final
+    return load_active_memories()
 
 
 def _load_memory_metadata() -> dict[str, dict[str, str]]:
-    """从 Chroma 加载 memory_id -> {project, category}。"""
+    """从 active_memories 加载 metadata；Chroma 作兜底。"""
+    from memory_sync import load_active_metadata
+
+    metadata_map = load_active_metadata()
+    if metadata_map:
+        return metadata_map
+
     try:
         import chromadb
 
@@ -182,11 +167,10 @@ def _load_memory_metadata() -> dict[str, dict[str, str]]:
     except Exception:
         return {}
 
-    metadata_map: dict[str, dict[str, str]] = {}
     ids = result.get('ids') or []
     metas = result.get('metadatas') or []
     for memory_id, meta in zip(ids, metas):
-        if not meta:
+        if not meta or memory_id in metadata_map:
             continue
         metadata_map[memory_id] = {
             'project': str(meta.get('project', '') or ''),
@@ -347,6 +331,69 @@ def _attach_rank(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return results
 
 
+def _rank_key(item: dict[str, Any]) -> tuple:
+    """merge 排序键：score 降序，再 vector/keyword rank 升序。"""
+    return (
+        -float(item.get('score', 0) or 0),
+        item.get('vector_rank') or 9999,
+        item.get('keyword_rank') or 9999,
+        item.get('id', ''),
+    )
+
+
+def _apply_project_scoring(merged: list[dict[str, Any]], project: str) -> None:
+    """就地写入 rrf_score / project_bonus / score（RRF + 项目匹配奖励）。"""
+    for item in merged:
+        rrf_score = float(item.get('score', 0) or 0)
+        bonus = RRF_PROJECT_BONUS if _project_matches(item.get('project', ''), project) else 0.0
+        item['rrf_score'] = rrf_score
+        item['project_bonus'] = bonus
+        item['score'] = rrf_score + bonus
+
+
+def _pick_with_project_quota(
+    merged: list[dict[str, Any]],
+    project: str,
+    max_results: int,
+) -> list[dict[str, Any]]:
+    """project 前 PROJECT_QUOTA_TOP 直保 + 全局 GLOBAL_QUOTA_MIN 保底，余量按 score 填充。"""
+    project_pool = sorted(
+        [item for item in merged if _project_matches(item.get('project', ''), project)],
+        key=_rank_key,
+    )
+    global_pool = sorted(
+        [item for item in merged if not _project_matches(item.get('project', ''), project)],
+        key=_rank_key,
+    )
+
+    if not project_pool:
+        return sorted(merged, key=_rank_key)[:max_results]
+
+    picked: list[dict[str, Any]] = []
+    picked_ids: set[str] = set()
+
+    for item in project_pool[:PROJECT_QUOTA_TOP]:
+        picked.append(item)
+        picked_ids.add(item['id'])
+
+    for item in global_pool[:GLOBAL_QUOTA_MIN]:
+        if item['id'] in picked_ids:
+            continue
+        picked.append(item)
+        picked_ids.add(item['id'])
+
+    if len(picked) < max_results:
+        for item in sorted(merged, key=_rank_key):
+            if item['id'] in picked_ids:
+                continue
+            picked.append(item)
+            picked_ids.add(item['id'])
+            if len(picked) >= max_results:
+                break
+
+    return picked[:max_results]
+
+
 def merge_and_rank(
     keyword_results: list[dict[str, Any]],
     vector_results: list[dict[str, Any]],
@@ -392,27 +439,16 @@ def merge_and_rank(
             'source': source,
         })
 
-    merged.sort(
-        key=lambda item: (
-            -float(item.get('score', 0) or 0),
-            item.get('vector_rank') or 9999,
-            item.get('keyword_rank') or 9999,
-            item.get('id', ''),
-        ),
-    )
+    merged.sort(key=_rank_key)
 
     if not project:
+        for item in merged:
+            item['rrf_score'] = float(item.get('score', 0) or 0)
+            item['project_bonus'] = 0.0
         return _attach_rank(merged[:max_results])
 
-    project_items = [item for item in merged if _project_matches(item.get('project', ''), project)]
-    global_items = [item for item in merged if not _project_matches(item.get('project', ''), project)]
-
-    # 指定 project 但检索结果里没有该项目记忆时，退回全量 Top-N（避免只剩 2 条全局）
-    if not project_items:
-        return _attach_rank(merged[:max_results])
-
-    final = project_items[:max(3, max_results - 2)] + global_items[:2]
-    return _attach_rank(final[:max_results])
+    _apply_project_scoring(merged, project)
+    return _attach_rank(_pick_with_project_quota(merged, project, max_results))
 
 
 def hybrid_search(
@@ -505,14 +541,16 @@ def format_mcp_search_output(results: list[dict[str, Any]]) -> str:
         rank = item.get('rank', '')
         keyword_score = float(item.get('keyword_score', 0) or 0)
         vector_score = float(item.get('vector_score', 0) or 0)
-        rrf_score = float(item.get('score', 0) or 0)
+        rrf_score = float(item.get('rrf_score', item.get('score', 0)) or 0)
+        project_bonus = float(item.get('project_bonus', 0) or 0)
         kw_rank = int(item.get('keyword_rank', 0) or 0)
         vec_rank = int(item.get('vector_rank', 0) or 0)
         rank_prefix = f'#{rank} ' if rank else ''
+        bonus_part = f' proj=+{project_bonus:.4f}' if project_bonus > 0 else ''
         lines.append(
             f'{rank_prefix}[{item.get("id", "")}] {scope_tag} ({source}) '
             f'kw={keyword_score:.2f} vec={vector_score:.2f} '
-            f'kw_rank={kw_rank} vec_rank={vec_rank} rrf={rrf_score:.4f} '
+            f'kw_rank={kw_rank} vec_rank={vec_rank} rrf={rrf_score:.4f}{bonus_part} '
             f'{item.get("text", "")}'
         )
     return '\n'.join(lines)

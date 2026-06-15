@@ -200,10 +200,30 @@ def collect_ancestor_ids(memory_id: str, *, max_depth: int = 8) -> list[str]:
 
 
 def build_timeline(memory_id: str, *, include_ancestors: bool = True) -> dict[str, Any]:
-    """合并 history.db 与 lineage.jsonl，返回时间线及上游 ID。"""
+    """合并 history.db、lineage.jsonl 与 deleted_archive.db，返回时间线及上游 ID。"""
     lineage_entries = _load_lineage_entries()
     timeline = _history_events(memory_id)
     timeline.extend(_lineage_related_entries(memory_id, lineage_entries))
+
+    try:
+        from memory_delete import get_deleted_record
+
+        archived = get_deleted_record(memory_id)
+        if archived:
+            timeline.append({
+                'ts': archived.get('deleted_at', ''),
+                'action': 'DELETE',
+                'memory_id': memory_id,
+                'source_ids': [],
+                'target_id': '',
+                'category': archived.get('category', ''),
+                'note': archived.get('reason', ''),
+                'content_preview': (archived.get('content', '') or '')[:200],
+                'actor': archived.get('actor', ''),
+                'origin': 'deleted_archive',
+            })
+    except Exception:
+        pass
 
     seen_keys: set[tuple[str, str, str]] = set()
     deduped: list[dict[str, Any]] = []

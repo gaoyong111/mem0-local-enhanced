@@ -1,3 +1,4 @@
+#!/Users/gaoyong/.pyenv/versions/3.10.17/bin/python3
 """统一 mem0 注入 Hook：Claude Code (UserPromptSubmit) + Cursor (beforeSubmitPrompt)"""
 
 from __future__ import annotations
