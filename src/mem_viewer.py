@@ -1,11 +1,15 @@
 """mem0 记忆可视化 Web UI — Flask + vis.js Network 图谱驱动"""
 
+import hashlib
 import json
 import os
 import sqlite3
 import sys
 import time
+import urllib.request
+import uuid
 from collections import defaultdict
+from datetime import datetime, timezone
 
 # mem0 安装目录
 _MEM0_DIR = os.getenv('MEM0_DIR', os.path.expanduser('~/.mem0'))
@@ -18,14 +22,18 @@ from hybrid_search import (  # noqa: E402
     detect_project,
     extract_keywords,
     hybrid_search,
+    infer_memory_lang,
     normalize_project,
 )
 from mem0_add_policy import (  # noqa: E402
     CATEGORY_COLORS,
     CATEGORY_LABELS,
+    DEFAULT_CATEGORY,
     VALID_CATEGORIES,
     apply_category_metadata,
+    apply_lang_metadata,
     normalize_category,
+    prepare_add_plan,
 )
 from memory_lineage import build_timeline, record_event  # noqa: E402
 
@@ -35,6 +43,10 @@ PORT = 8765
 DEFAULT_USER = os.getenv('MEM0_USER_ID', 'default-user')
 # 与 mcp_server_local.py DEFAULT_MAX_RESULTS 保持一致，便于对比检索效果
 MCP_SEARCH_MAX_RESULTS = 8
+_PRIMARY_CONFIG = os.getenv('MEM0_CONFIG', os.path.expanduser('~/.mem0/config_local.json'))
+_FALLBACK_CONFIG = os.getenv('MEM0_FALLBACK_CONFIG', os.path.expanduser('~/.mem0/config_ollama.json'))
+_chroma_client = None
+_chroma_collection = None
 
 # 项目颜色映射（固定 8 色，超出后循环）
 _PROJECT_COLORS = [
@@ -98,9 +110,7 @@ def load_all_memories() -> list[dict]:
 def _load_chroma_metadata() -> dict[str, dict]:
     """从 ChromaDB 加载 memory_id -> metadata 映射。"""
     try:
-        import chromadb
-        client = chromadb.PersistentClient(path=CHROMA_DB_PATH)
-        col = client.get_collection('mem0')
+        col = _get_chroma_collection()
         result = col.get(include=['metadatas'])
     except Exception:
         return {}
@@ -269,6 +279,213 @@ def compute_edges(memories: list[dict]) -> list[dict]:
     return edges
 
 
+def _load_mem0_config() -> dict:
+    """读取 mem0 主/兜底配置（与 MCP 一致）。"""
+    for path in (_PRIMARY_CONFIG, _FALLBACK_CONFIG):
+        try:
+            with open(path, encoding='utf-8') as handle:
+                return json.load(handle)
+        except OSError:
+            continue
+    return {}
+
+
+def _get_chroma_collection():
+    """进程内单例 Chroma collection，避免与 mem0 Memory 重复初始化冲突。"""
+    global _chroma_client, _chroma_collection
+    if _chroma_collection is not None:
+        return _chroma_collection
+
+    import chromadb
+
+    _chroma_client = chromadb.PersistentClient(path=CHROMA_DB_PATH)
+    _chroma_collection = _chroma_client.get_collection('mem0')
+    return _chroma_collection
+
+
+def _sanitize_chroma_metadata(meta: dict) -> dict:
+    """Chroma metadata 仅支持标量类型。"""
+    clean: dict = {}
+    for key, value in meta.items():
+        if value is None:
+            continue
+        if isinstance(value, (str, int, float, bool)):
+            clean[key] = value
+        else:
+            clean[key] = str(value)
+    return clean
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _insert_history_add(memory_id: str, content: str) -> None:
+    """写入 history.db ADD 行，供时间线展示。"""
+    conn = sqlite3.connect(HISTORY_DB)
+    try:
+        conn.execute(
+            """
+            INSERT INTO history (
+                id, memory_id, old_memory, new_memory, event, created_at, is_deleted
+            ) VALUES (?, ?, NULL, ?, 'ADD', ?, 0)
+            """,
+            (str(uuid.uuid4()), memory_id, content, _utc_now_iso()),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def embed_text(text: str) -> list[float]:
+    """Ollama embedding，用于正文更新后重嵌 Chroma。"""
+    config = _load_mem0_config()
+    embed_model = config.get('embedder', {}).get('config', {}).get('model', 'bge-m3')
+    ollama_url = config.get('embedder', {}).get('config', {}).get(
+        'ollama_base_url', 'http://localhost:11434'
+    )
+    payload = json.dumps({'model': embed_model, 'prompt': text}).encode()
+    request = urllib.request.Request(
+        f'{ollama_url}/api/embeddings',
+        data=payload,
+        headers={'Content-Type': 'application/json'},
+    )
+    response = urllib.request.urlopen(request, timeout=30)
+    vector = json.loads(response.read()).get('embedding', [])
+    if not vector:
+        raise RuntimeError('embedding 返回为空，请确认 Ollama 已启动')
+    return vector
+
+
+def add_memory_from_viewer(content: str, *, project: str = '', category: str = 'episodic') -> dict:
+    """viewer 新增记忆：prepare_add_plan + Chroma 直写 + active 同步（不经 mem0 Memory）。"""
+    content = (content or '').strip()
+    if not content:
+        raise ValueError('正文不能为空')
+
+    project = normalize_project(project)
+    category = normalize_category(category or DEFAULT_CATEGORY)
+    if category not in VALID_CATEGORIES:
+        raise ValueError(f'无效 category: {category}')
+
+    metadata_raw = json.dumps({'category': category}, ensure_ascii=False)
+    plan = prepare_add_plan(content, metadata_raw, project, 'false')
+    memory_id = str(uuid.uuid4())
+    now = _utc_now_iso()
+
+    chroma_meta = _sanitize_chroma_metadata({
+        **plan.metadata,
+        'data': plan.content,
+        'user_id': DEFAULT_USER,
+        'created_at': now,
+        'updated_at': now,
+        'hash': hashlib.md5(plan.content.encode('utf-8')).hexdigest(),
+        'role': 'user',
+    })
+    embedding = embed_text(plan.content)
+    col = _get_chroma_collection()
+    col.add(ids=[memory_id], embeddings=[embedding], metadatas=[chroma_meta])
+
+    from memory_sync import sync_active_insert
+
+    sync_active_insert(
+        memory_id,
+        plan.content,
+        project=str(plan.metadata.get('project', '') or project or ''),
+        category=str(plan.metadata.get('category', '') or category or ''),
+        lang=str(plan.metadata.get('lang', '') or infer_memory_lang(plan.content)),
+    )
+    _insert_history_add(memory_id, plan.content)
+    record_event(
+        'ADD',
+        memory_id,
+        category=category,
+        note='viewer 手动新增',
+        content_preview=plan.content,
+        actor='mem_viewer',
+    )
+    return {
+        'ok': True,
+        'id': memory_id,
+        'content': plan.content,
+        'project': normalize_project(str(plan.metadata.get('project', '') or '')),
+        'category': normalize_category(str(plan.metadata.get('category', '') or '')),
+    }
+
+
+def update_memory_content(
+    memory_id: str,
+    content: str,
+    *,
+    project: str | None = None,
+    category: str | None = None,
+) -> dict:
+    """viewer 正文扩写：SQLite + history UPDATE + Chroma 重嵌。"""
+    from memory_sync import get_active_record, sync_active_update_content
+
+    content = (content or '').strip()
+    if not content:
+        raise ValueError('正文不能为空')
+
+    old = get_active_record(memory_id)
+    if not old:
+        raise ValueError(f'记忆不存在: {memory_id}')
+
+    new_project = normalize_project(project) if project is not None else normalize_project(old.get('project', ''))
+    new_category = (
+        normalize_category(category)
+        if category is not None
+        else normalize_category(old.get('category', '') or 'episodic')
+    )
+    if new_category not in VALID_CATEGORIES:
+        raise ValueError(f'无效 category: {new_category}')
+
+    lang = infer_memory_lang(content)
+    sync_active_update_content(
+        memory_id,
+        content,
+        project=new_project,
+        category=new_category,
+        lang=lang,
+    )
+
+    col = _get_chroma_collection()
+    result = col.get(ids=[memory_id], include=['metadatas'])
+    ids = result.get('ids') or []
+    if not ids:
+        raise ValueError(f'Chroma 中不存在: {memory_id}')
+
+    old_meta = dict((result.get('metadatas') or [{}])[0] or {})
+    new_meta = dict(old_meta)
+    new_meta['data'] = content
+    new_meta['project'] = new_project
+    new_meta['category'] = new_category
+    new_meta['updated_at'] = _utc_now_iso()
+    new_meta['hash'] = hashlib.md5(content.encode('utf-8')).hexdigest()
+    apply_category_metadata(new_meta)
+    apply_lang_metadata(new_meta, content)
+
+    embedding = embed_text(content)
+    col.update(ids=[memory_id], embeddings=[embedding], metadatas=[_sanitize_chroma_metadata(new_meta)])
+
+    record_event(
+        'UPDATE',
+        memory_id,
+        category=new_category,
+        note='viewer 正文扩写',
+        content_preview=content,
+        actor='mem_viewer',
+    )
+    return {
+        'changed': True,
+        'content': content,
+        'project': new_project,
+        'category': new_category,
+        'category_label': CATEGORY_LABELS.get(new_category, new_category),
+        'category_raw': str(new_meta.get('category_raw', '') or ''),
+    }
+
+
 from flask import Flask, jsonify, render_template_string, request  # noqa: E402
 
 app = Flask(__name__)
@@ -292,6 +509,32 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
   .toolbar button:hover { opacity:0.8; }
   .btn-search { background:#3498db; color:#fff; }
   .btn-reset { background:#e74c3c; color:#fff; }
+  .btn-add { background:#2ecc71; color:#fff; white-space:nowrap; }
+
+  .modal-overlay { position:fixed; inset:0; background:rgba(0,0,0,0.55); display:none; align-items:center; justify-content:center; z-index:100; }
+  .modal-overlay.visible { display:flex; }
+  .modal-card { width:min(560px, 92vw); max-height:85vh; overflow-y:auto; background:#16213e; border:1px solid #0f3460; border-radius:10px; padding:20px; }
+  .modal-title { font-size:18px; font-weight:600; color:#3498db; margin-bottom:16px; }
+  .modal-field { margin-bottom:12px; }
+  .modal-field label { display:block; font-size:12px; color:#7f8c8d; margin-bottom:6px; }
+  .modal-field textarea { width:100%; min-height:140px; padding:10px 12px; border-radius:6px; border:1px solid #0f3460; background:#1a1a2e; color:#e0e0e0; font-size:14px; line-height:1.5; resize:vertical; }
+  .modal-field input, .modal-field select { width:100%; padding:8px 12px; border-radius:6px; border:1px solid #0f3460; background:#1a1a2e; color:#e0e0e0; font-size:14px; }
+  .similar-warn { margin-top:8px; padding:10px; border-radius:6px; background:#1a1a2e; border:1px solid #f39c12; font-size:12px; color:#f39c12; display:none; }
+  .similar-warn.visible { display:block; }
+  .similar-item { margin-top:6px; color:#bdc3c7; line-height:1.4; cursor:pointer; }
+  .similar-item:hover { color:#3498db; }
+  .modal-actions { display:flex; gap:10px; justify-content:flex-end; margin-top:16px; }
+  .modal-actions button { padding:8px 16px; border-radius:6px; border:none; cursor:pointer; font-size:14px; }
+  .btn-cancel { background:#7f8c8d; color:#fff; }
+  .btn-primary { background:#2ecc71; color:#fff; }
+  .detail-textarea { width:100%; min-height:120px; padding:8px 10px; border-radius:6px; border:1px solid #0f3460; background:#1a1a2e; color:#e0e0e0; font-size:14px; line-height:1.6; resize:vertical; display:none; }
+  .detail-textarea.visible { display:block; }
+  .detail-actions { display:flex; gap:8px; margin-top:8px; flex-wrap:wrap; }
+  .btn-edit-content { background:#3498db; color:#fff; padding:6px 14px; border:none; border-radius:6px; cursor:pointer; font-size:13px; }
+  .btn-save-content { background:#2ecc71; color:#fff; padding:6px 14px; border:none; border-radius:6px; cursor:pointer; font-size:13px; display:none; }
+  .btn-save-content.visible { display:inline-block; }
+  .btn-cancel-content { background:#7f8c8d; color:#fff; padding:6px 14px; border:none; border-radius:6px; cursor:pointer; font-size:13px; display:none; }
+  .btn-cancel-content.visible { display:inline-block; }
 
   .search-results { padding:8px 16px; background:#16213e; border-bottom:1px solid #0f3460; max-height:220px; overflow-y:auto; display:none; }
   .search-results.visible { display:block; }
@@ -306,15 +549,36 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
 
   .main { display:flex; flex:1; overflow:hidden; }
   #graph-container { flex:1; }
-  #detail-panel { width:320px; padding:16px; background:#16213e; border-left:1px solid #0f3460; overflow-y:auto; display:none; }
-  #detail-panel.visible { display:block; }
+  #detail-panel { width:320px; background:#16213e; border-left:1px solid #0f3460; overflow:hidden; display:none; flex-direction:column; }
+  #detail-panel.visible { display:flex; }
+  #detail-panel-body { flex:1; overflow-y:auto; padding:16px; min-height:0; }
+  #detail-panel-footer { flex-shrink:0; padding:12px 16px 16px; border-top:1px solid #0f3460; background:#16213e; }
 
   .detail-title { font-size:16px; font-weight:600; margin-bottom:12px; color:#3498db; }
   .detail-section { margin-bottom:16px; }
   .detail-label { font-size:12px; color:#7f8c8d; margin-bottom:4px; }
   .detail-text { font-size:14px; line-height:1.6; white-space:pre-wrap; }
   .detail-meta { font-size:12px; color:#95a5a6; }
-  .timeline-list { list-style:none; padding:0; margin:8px 0 0; }
+  .timeline-hint { font-size:11px; color:#7f8c8d; margin-bottom:4px; }
+  .timeline-scroll { max-height:140px; overflow-y:auto; margin-top:4px; padding-right:4px; }
+  .timeline-list { list-style:none; padding:0; margin:0; }
+  .merge-sources { margin-top:4px; max-height:200px; overflow-y:auto; padding-right:4px; }
+  .merge-sources-empty { font-size:12px; color:#95a5a6; }
+  .merge-sources-title { font-size:12px; color:#7f8c8d; margin-bottom:8px; }
+  .merge-source-node { margin-bottom:10px; border:1px solid #0f3460; border-radius:6px; background:#1a1a2e; overflow:hidden; }
+  .merge-source-node.nested { margin-left:12px; margin-top:8px; border-style:dashed; }
+  .merge-source-head { display:flex; align-items:center; gap:8px; flex-wrap:wrap; padding:8px 10px; background:#16213e; font-size:12px; color:#bdc3c7; }
+  .merge-source-badge { display:inline-block; padding:2px 6px; border-radius:4px; font-size:11px; font-weight:600; }
+  .merge-source-badge.active { background:#1e4620; color:#2ecc71; }
+  .merge-source-badge.deleted { background:#4a2020; color:#e74c3c; }
+  .merge-source-badge.history { background:#3d3520; color:#f39c12; }
+  .merge-source-badge.missing { background:#2c2c2c; color:#95a5a6; }
+  .merge-source-id { color:#7f8c8d; font-family:monospace; }
+  .merge-source-meta { font-size:11px; color:#7f8c8d; width:100%; }
+  .merge-source-locate { padding:2px 8px; border:none; border-radius:4px; background:#3498db; color:#fff; font-size:11px; cursor:pointer; }
+  .merge-source-locate:hover { opacity:0.85; }
+  .merge-source-body { padding:8px 10px; font-size:12px; line-height:1.5; color:#e0e0e0; white-space:pre-wrap; word-break:break-word; }
+  .merge-source-children { padding:0 8px 8px; }
   .timeline-item { border-left:2px solid #3498db; padding:6px 0 6px 10px; margin-bottom:8px; }
   .timeline-item .tl-head { font-size:12px; color:#3498db; margin-bottom:4px; }
   .timeline-item .tl-body { font-size:12px; color:#bdc3c7; line-height:1.5; white-space:pre-wrap; }
@@ -325,7 +589,7 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
   .btn-save { margin-top:4px; padding:6px 14px; background:#2ecc71; color:#fff; border:none; border-radius:6px; cursor:pointer; font-size:13px; }
   .btn-save:hover { opacity:0.8; }
   .btn-save:disabled { opacity:0.5; cursor:not-allowed; }
-  .btn-delete { margin-top:16px; padding:8px 16px; background:#e74c3c; color:#fff; border:none; border-radius:6px; cursor:pointer; font-size:13px; }
+  .btn-delete { width:100%; padding:8px 16px; background:#e74c3c; color:#fff; border:none; border-radius:6px; cursor:pointer; font-size:13px; }
   .btn-delete:hover { opacity:0.8; }
 
   .stats { padding:8px 16px; background:#16213e; border-top:1px solid #0f3460; font-size:12px; color:#7f8c8d; text-align:center; }
@@ -359,7 +623,35 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
     {% endfor %}
   </select>
   <button class="btn-search" onclick="doSearch()">搜索</button>
+  <button class="btn-add" onclick="openAddModal()">+ 新增记忆</button>
   <button class="btn-reset" onclick="resetGraph()">重置</button>
+</div>
+
+<div id="add-modal" class="modal-overlay" onclick="onAddModalBackdrop(event)">
+  <div class="modal-card" onclick="event.stopPropagation()">
+    <div class="modal-title">新增记忆</div>
+    <div class="modal-field">
+      <label>正文（中文完整句，可含 Why / How to apply）</label>
+      <textarea id="add-content" placeholder="例如：5月19号下大雨我没带伞，下次梅雨季节记得随身带伞。" oninput="scheduleSimilarCheck()"></textarea>
+      <div id="add-similar" class="similar-warn"></div>
+    </div>
+    <div class="modal-field">
+      <label>项目（留空 = 全局）</label>
+      <input type="text" id="add-project" placeholder="留空 = 全局" oninput="scheduleSimilarCheck()" />
+    </div>
+    <div class="modal-field">
+      <label>分类</label>
+      <select id="add-category">
+        {% for cat, label in category_items %}
+        <option value="{{ cat }}">{{ label }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="modal-actions">
+      <button class="btn-cancel" onclick="closeAddModal()">取消</button>
+      <button class="btn-primary" id="btn-add-save" onclick="saveNewMemory()">保存</button>
+    </div>
+  </div>
 </div>
 
 <div id="search-results" class="search-results">
@@ -403,10 +695,17 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
 <div class="main">
   <div id="graph-container"></div>
   <div id="detail-panel">
+    <div id="detail-panel-body">
     <div class="detail-title" id="detail-title"></div>
     <div class="detail-section">
       <div class="detail-label">记忆正文</div>
       <div class="detail-text" id="detail-text"></div>
+      <textarea class="detail-textarea" id="edit-content"></textarea>
+      <div class="detail-actions">
+        <button class="btn-edit-content" id="btn-edit-content" onclick="startEditContent()">编辑正文</button>
+        <button class="btn-save-content" id="btn-save-content" onclick="saveContent()">保存正文</button>
+        <button class="btn-cancel-content" id="btn-cancel-content" onclick="cancelEditContent()">取消</button>
+      </div>
     </div>
     <div class="detail-section">
       <div class="detail-label">项目 / 分类</div>
@@ -423,8 +722,11 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
     </div>
     <div class="detail-section">
       <div class="detail-label">演变时间线</div>
-      <div class="detail-meta" id="detail-ancestors"></div>
-      <ul class="timeline-list" id="detail-timeline"></ul>
+      <div class="detail-meta timeline-hint">合并来源：展示并入本条的原记忆正文；若来源本身由合并产生会继续展开</div>
+      <div id="detail-ancestors" class="merge-sources"></div>
+      <div class="timeline-scroll">
+        <ul class="timeline-list" id="detail-timeline"></ul>
+      </div>
     </div>
     <div class="detail-section">
       <div class="detail-label">Metadata</div>
@@ -438,7 +740,10 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
       <div class="detail-label">ID</div>
       <div class="detail-meta" id="detail-id"></div>
     </div>
-    <button class="btn-delete" id="btn-delete" onclick="deleteMemory()">删除此记忆</button>
+    </div>
+    <div id="detail-panel-footer">
+      <button class="btn-delete" id="btn-delete" onclick="deleteMemory()">删除此记忆</button>
+    </div>
   </div>
 </div>
 
@@ -483,6 +788,7 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
   });
 
   function showDetail(id) {
+    cancelEditContent();
     const mem = memoriesMap[id];
     if (!mem) return;
     const thick = thicknessMap[id] || {};
@@ -540,33 +846,99 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
     });
   }
 
+  function renderMergeSourceNode(source, nested) {
+    const wrap = document.createElement('div');
+    wrap.className = 'merge-source-node' + (nested ? ' nested' : '');
+
+    const status = source.status || 'missing';
+    const badgeClass = ['active', 'deleted', 'history', 'missing'].includes(status) ? status : 'missing';
+    const badgeLabel = {
+      active: '活跃',
+      deleted: '已删除',
+      history: '历史预览',
+      missing: '缺失',
+    }[status] || '缺失';
+
+    const head = document.createElement('div');
+    head.className = 'merge-source-head';
+    let headHtml =
+      '<span class="merge-source-badge ' + badgeClass + '">' + badgeLabel + '</span>' +
+      '<span class="merge-source-id">' + (source.id || '').slice(0, 8) + '...</span>';
+    if (status === 'active' && memoriesMap[source.id]) {
+      headHtml += '<button type="button" class="merge-source-locate" data-id="' + source.id + '">在图谱定位</button>';
+    }
+    head.innerHTML = headHtml;
+
+    const metaParts = [];
+    if (source.project) metaParts.push('[' + source.project + ']');
+    if (source.category) metaParts.push(source.category);
+    if (source.deleted_at) metaParts.push('删除: ' + source.deleted_at);
+    if (source.reason) metaParts.push('原因: ' + source.reason);
+    if (source.note) metaParts.push(source.note);
+    if (metaParts.length) {
+      const meta = document.createElement('div');
+      meta.className = 'merge-source-meta';
+      meta.textContent = metaParts.join(' · ');
+      head.appendChild(meta);
+    }
+
+    const locateBtn = head.querySelector('.merge-source-locate');
+    if (locateBtn) {
+      locateBtn.addEventListener('click', function() {
+        jumpToMemory(locateBtn.getAttribute('data-id'));
+      });
+    }
+
+    const body = document.createElement('div');
+    body.className = 'merge-source-body';
+    body.textContent = source.content || '(无正文记录)';
+
+    wrap.appendChild(head);
+    wrap.appendChild(body);
+
+    const children = source.sources || [];
+    if (children.length) {
+      const childWrap = document.createElement('div');
+      childWrap.className = 'merge-source-children';
+      children.forEach(child => childWrap.appendChild(renderMergeSourceNode(child, true)));
+      wrap.appendChild(childWrap);
+    }
+    return wrap;
+  }
+
+  function renderMergeSources(container, sources) {
+    container.innerHTML = '';
+    if (!sources || !sources.length) {
+      container.innerHTML = '<div class="merge-sources-empty">合并来源: 无</div>';
+      return;
+    }
+    const title = document.createElement('div');
+    title.className = 'merge-sources-title';
+    title.textContent = '合并来源 (' + sources.length + ' 条直接来源)';
+    container.appendChild(title);
+    sources.forEach(source => container.appendChild(renderMergeSourceNode(source, false)));
+  }
+
   function loadTimeline(id) {
     const timelineEl = document.getElementById('detail-timeline');
     const ancestorsEl = document.getElementById('detail-ancestors');
     timelineEl.innerHTML = '<li class="timeline-item"><div class="tl-body">加载中...</div></li>';
-    ancestorsEl.textContent = '';
+    ancestorsEl.innerHTML = '<div class="merge-sources-empty">加载中...</div>';
     fetch('/api/timeline/' + encodeURIComponent(id))
       .then(r => r.json())
       .then(data => {
         renderTimelineEvents(timelineEl, data.events || []);
-        const ancestors = data.ancestor_ids || [];
-        if (ancestors.length) {
-          ancestorsEl.innerHTML = '上游记忆: ' + ancestors.map(aid =>
-            '<span class="timeline-link" onclick="jumpToMemory(\\'' + aid + '\\')">' + aid.slice(0, 8) + '...</span>'
-          ).join(' · ');
-        } else {
-          ancestorsEl.textContent = '上游记忆: 无';
-        }
+        renderMergeSources(ancestorsEl, data.merge_sources || []);
       })
       .catch(err => {
         console.error('timeline failed', err);
         timelineEl.innerHTML = '<li class="timeline-item"><div class="tl-body">时间线加载失败</div></li>';
+        ancestorsEl.innerHTML = '<div class="merge-sources-empty">合并来源加载失败</div>';
       });
   }
 
   function jumpToMemory(id) {
     if (!memoriesMap[id]) {
-      alert('该上游记忆已不在当前图谱（可能已删除）');
       return;
     }
     selectedId = id;
@@ -577,7 +949,178 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
 
   function hideDetail() {
     selectedId = null;
+    cancelEditContent();
     document.getElementById('detail-panel').classList.remove('visible');
+  }
+
+  let similarCheckTimer = null;
+  let contentEditing = false;
+
+  function scheduleSimilarCheck() {
+    clearTimeout(similarCheckTimer);
+    similarCheckTimer = setTimeout(refreshSimilarWarn, 400);
+  }
+
+  function refreshSimilarWarn() {
+    const content = document.getElementById('add-content').value.trim();
+    const panel = document.getElementById('add-similar');
+    if (!content) {
+      panel.classList.remove('visible');
+      panel.innerHTML = '';
+      return;
+    }
+    const project = document.getElementById('add-project').value.trim();
+    let url = '/api/similar?q=' + encodeURIComponent(content);
+    if (project) {
+      url += '&project=' + encodeURIComponent(project);
+    }
+    fetch(url)
+      .then(r => r.json())
+      .then(payload => {
+        const results = payload.results || [];
+        if (!results.length) {
+          panel.classList.remove('visible');
+          panel.innerHTML = '';
+          return;
+        }
+        panel.classList.add('visible');
+        panel.innerHTML = '<div>发现 ' + results.length + ' 条相似记忆（保存前请确认是否重复）：</div>' +
+          results.map(item =>
+            '<div class="similar-item" onclick="jumpToMemory(\\'' + item.id + '\\')">#' +
+            item.id.slice(0, 8) + '... score=' + Number(item.score).toFixed(2) + ' · ' + item.text + '</div>'
+          ).join('');
+      })
+      .catch(() => {
+        panel.classList.remove('visible');
+      });
+  }
+
+  function openAddModal() {
+    document.getElementById('add-content').value = '';
+    document.getElementById('add-project').value = '';
+    document.getElementById('add-category').value = 'episodic';
+    document.getElementById('add-similar').classList.remove('visible');
+    document.getElementById('add-similar').innerHTML = '';
+    document.getElementById('add-modal').classList.add('visible');
+    document.getElementById('add-content').focus();
+  }
+
+  function closeAddModal() {
+    document.getElementById('add-modal').classList.remove('visible');
+  }
+
+  function onAddModalBackdrop(event) {
+    if (event.target.id === 'add-modal') {
+      closeAddModal();
+    }
+  }
+
+  function saveNewMemory() {
+    const content = document.getElementById('add-content').value.trim();
+    if (!content) {
+      alert('请填写正文');
+      return;
+    }
+    const project = document.getElementById('add-project').value.trim();
+    const category = document.getElementById('add-category').value;
+    const btn = document.getElementById('btn-add-save');
+    btn.disabled = true;
+    btn.textContent = '保存中...';
+    fetch('/api/add', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content, project, category }),
+    })
+      .then(r => r.json())
+      .then(result => {
+        btn.disabled = false;
+        btn.textContent = '保存';
+        if (!result.ok) {
+          alert('保存失败: ' + (result.error || '未知错误'));
+          return;
+        }
+        closeAddModal();
+        location.reload();
+      })
+      .catch(err => {
+        btn.disabled = false;
+        btn.textContent = '保存';
+        console.error('add failed', err);
+        alert('保存失败，请重试');
+      });
+  }
+
+  function startEditContent() {
+    if (!selectedId) return;
+    const mem = memoriesMap[selectedId];
+    if (!mem) return;
+    contentEditing = true;
+    document.getElementById('detail-text').style.display = 'none';
+    const textarea = document.getElementById('edit-content');
+    textarea.value = mem.text;
+    textarea.classList.add('visible');
+    document.getElementById('btn-edit-content').style.display = 'none';
+    document.getElementById('btn-save-content').classList.add('visible');
+    document.getElementById('btn-cancel-content').classList.add('visible');
+  }
+
+  function cancelEditContent() {
+    contentEditing = false;
+    document.getElementById('detail-text').style.display = '';
+    const textarea = document.getElementById('edit-content');
+    textarea.classList.remove('visible');
+    textarea.value = '';
+    document.getElementById('btn-edit-content').style.display = '';
+    document.getElementById('btn-save-content').classList.remove('visible');
+    document.getElementById('btn-cancel-content').classList.remove('visible');
+  }
+
+  function saveContent() {
+    if (!selectedId) return;
+    const mem = memoriesMap[selectedId];
+    if (!mem) return;
+    const content = document.getElementById('edit-content').value.trim();
+    if (!content) {
+      alert('正文不能为空');
+      return;
+    }
+    if (content === mem.text) {
+      cancelEditContent();
+      return;
+    }
+    const btn = document.getElementById('btn-save-content');
+    btn.disabled = true;
+    btn.textContent = '保存中...';
+    fetch('/api/update/' + encodeURIComponent(selectedId), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content }),
+    })
+      .then(r => r.json())
+      .then(result => {
+        btn.disabled = false;
+        btn.textContent = '保存正文';
+        if (!result.ok) {
+          alert('保存失败: ' + (result.error || '未知错误'));
+          return;
+        }
+        mem.text = result.content || content;
+        document.getElementById('detail-text').textContent = mem.text;
+        nodes.update({
+          id: selectedId,
+          label: mem.text.slice(0, 30) + (mem.text.length > 30 ? '...' : ''),
+          title: (mem.project ? '[' + mem.project + '] ' : '[全局] ') +
+            mem.text.slice(0, 60) + (mem.text.length > 60 ? '...' : ''),
+        });
+        cancelEditContent();
+        loadTimeline(selectedId);
+      })
+      .catch(err => {
+        btn.disabled = false;
+        btn.textContent = '保存正文';
+        console.error('save content failed', err);
+        alert('保存失败，请重试');
+      });
   }
 
   function getFilters() {
@@ -836,7 +1379,7 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
       alert('必须填写删除原因');
       return;
     }
-    if (!confirm('确认删除记忆 ' + selectedId + '？\n原因：' + reason.trim())) return;
+    if (!confirm('确认删除记忆 ' + selectedId + '？\\n原因：' + reason.trim())) return;
     fetch('/delete/' + selectedId, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -967,10 +1510,7 @@ def update_memory_metadata(
     category: str | None = None,
 ) -> dict:
     """更新 Chroma metadata 中的 project/category，不重算向量。"""
-    import chromadb
-
-    client = chromadb.PersistentClient(path=CHROMA_DB_PATH)
-    col = client.get_collection('mem0')
+    col = _get_chroma_collection()
     result = col.get(ids=[memory_id], include=['metadatas'])
     ids = result.get('ids') or []
     if not ids:
@@ -1006,7 +1546,7 @@ def update_memory_metadata(
             'category_raw': str(new_meta.get('category_raw', '') or ''),
         }
 
-    col.update(ids=[memory_id], metadatas=[new_meta])
+    col.update(ids=[memory_id], metadatas=[_sanitize_chroma_metadata(new_meta)])
 
     from memory_sync import sync_active_update_meta
 
@@ -1044,14 +1584,80 @@ def update_memory_metadata(
     }
 
 
+@app.route('/api/similar')
+def similar_memories():
+    """保存前查相似记忆（与 hybrid_search 同算法）。"""
+    query = request.args.get('q', '').strip()
+    if not query:
+        return jsonify({'results': [], 'query': ''})
+
+    project = normalize_project(request.args.get('project', ''))
+    results = hybrid_search(query, project=project, max_results=5)
+    payload = []
+    for item in results:
+        payload.append({
+            'id': item.get('id', ''),
+            'score': round(float(item.get('score', 0) or 0), 2),
+            'source': item.get('source', ''),
+            'text': (item.get('text', '') or '')[:160],
+        })
+    return jsonify({'query': query, 'effective_project': project, 'results': payload})
+
+
+@app.route('/api/add', methods=['POST'])
+def add_memory_route():
+    """viewer 手动新增记忆。"""
+    body = request.get_json(silent=True) or {}
+    content = str(body.get('content', '') or '').strip()
+    if not content:
+        return jsonify({'ok': False, 'error': '正文不能为空'}), 400
+
+    project = normalize_project(str(body.get('project', '') or ''))
+    category = normalize_category(str(body.get('category', '') or '') or DEFAULT_CATEGORY)
+    if category not in VALID_CATEGORIES:
+        return jsonify({'ok': False, 'error': f'无效 category: {category}'}), 400
+
+    try:
+        result = add_memory_from_viewer(content, project=project, category=category)
+        status = 200 if result.get('ok') else 409
+        return jsonify(result), status
+    except Exception as exc:
+        return jsonify({'ok': False, 'error': str(exc)}), 500
+
+
 @app.route('/api/update/<memory_id>', methods=['POST'])
 def update_memory(memory_id: str):
-    """更新记忆的 project/category（仅 metadata，不重嵌向量）。"""
+    """更新记忆：正文扩写（重嵌向量）或 project/category（仅 metadata）。"""
     body = request.get_json(silent=True) or {}
+    has_content = 'content' in body
     has_project = 'project' in body
     has_category = 'category' in body
+
+    if has_content:
+        content = str(body.get('content', '') or '').strip()
+        if not content:
+            return jsonify({'ok': False, 'error': '正文不能为空'}), 400
+        project = body.get('project') if has_project else None
+        category = body.get('category') if has_category else None
+        if has_category:
+            normalized = normalize_category(category)
+            if normalized not in VALID_CATEGORIES:
+                return jsonify({'ok': False, 'error': f'无效 category: {category}'}), 400
+        try:
+            result = update_memory_content(
+                memory_id,
+                content,
+                project=project,
+                category=category,
+            )
+            return jsonify({'ok': True, **result})
+        except ValueError as exc:
+            return jsonify({'ok': False, 'error': str(exc)}), 404
+        except Exception as exc:
+            return jsonify({'ok': False, 'error': str(exc)}), 500
+
     if not has_project and not has_category:
-        return jsonify({'ok': False, 'error': '至少提供 project 或 category'}), 400
+        return jsonify({'ok': False, 'error': '至少提供 content、project 或 category'}), 400
 
     project = body.get('project') if has_project else None
     category = body.get('category') if has_category else None

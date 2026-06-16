@@ -104,21 +104,26 @@ Chroma metadata 仅支持标量值，嵌套的 `structured` dict 会被序列化
 ```
 用户查询
     │
-    ├── 关键词检索（active_memories.db）
-    │   ├─ 中文 2–4 字滑动窗口 + 英文 token 子串匹配
-    │   └─ 返回 top-50 候选
+    ├── ① 向量检索（Chroma + Ollama bge-m3）— 语义为主
+    │   ├─ 中文 query 排除 lang=en（oversample×4）
+    │   ├─ 相对阈值：vec_score < top1−0.10 不进池
+    │   └─ top-50 → vec_rank_map
     │
-    ├── 向量检索（Chroma + Ollama bge-m3）
-    │   ├─ Ollama bge-m3 生成查询向量
-    │   ├─ Chroma cosine 近邻（中文 query 排除 lang=en，oversample×4）
-    │   └─ 返回 top-50 候选
+    ├── ② 关键词检索（active_memories.db）— 依赖 vec_rank_map
+    │   ├─ 滑窗 2–4 字 + primary≤6 + 英文 token
+    │   ├─ 最长命中去重叠、TF cap=3
+    │   ├─ 条件子序列（主 keyword，vec_gate 门控）
+    │   ├─ kw 相对截断：score < top1×0.25 不进池
+    │   └─ top-50 → kw_rank
     │
-    └── 加权 RRF 融合（merge_and_rank）
-        ├─ rrf = 1/(K+vec_rank) + 0.5·1/(K+kw_rank) [+0.008 双路共识]
-        ├─ K=15；指定 project 时匹配记忆 +0.005 奖励分
-        ├─ 配额：project 前 3 直保 + 全局保底 2；余量按 score 填充
-        └─ 默认返回 top-5（MCP）/ top-8（viewer）
+    └── ③ 加权 RRF 融合（merge_and_rank）
+        ├─ rrf = 1/(K+vec_rank) + 0.5·1/(K+kw_rank)；K=15，β=0
+        ├─ project 匹配 +0.005；preference 跨类 +0.008
+        ├─ 配额：project 前 3 直保 + 全局保底 2
+        └─ 默认 top-5（MCP）/ top-8（viewer）
 ```
+
+跨词同义（如淋雨↔下雨）交给向量路，不维护手动同义词表。设计文档见 `daily-reviews/hybrid-search-design.md`。
 
 ### 关键词数据源
 
@@ -126,15 +131,17 @@ Chroma metadata 仅支持标量值，嵌套的 `structured` dict 会被序列化
 
 ### 关键词计分规则
 
-- 每个关键词在记忆文本中的出现次数 × min(关键词长度, 5)
-- 长关键词（≥5字符）权重更高，防止短关键词误召回
-- 最终按总分排序，取 top_k
+- 最长命中优先去重叠（同一段文本不重复计分）
+- 单 keyword 命中次数 cap：`TF_CAP=3`
+- 子串未命中时：主 keyword（2–4 字）可走条件子序列（弱分 ×0.5，且 `vec_rank ≤ gate`）
+- 排序后相对截断：`score < top1 × 0.25` 不进 keyword 池
+- RRF 只看 kw_rank，不看 kw 绝对分
 
 ### 向量计分规则
 
-- Chroma 返回的是 cosine distance
-- score = 1.0 - distance / 2.0（近似 cosine similarity）
-- 展示用；排序融合走 RRF rank，不看绝对分阈值
+- Chroma 返回 cosine distance；展示分 `1.0 - distance/2.0`
+- 相对阈值 `VECTOR_SCORE_REL_MARGIN=0.10`：低于 top1−δ 不进向量池
+- 排序融合走 RRF rank，不看 vec 绝对分阈值
 
 **注意**：MCP 输出 `kw=` / `vec=` / `kw_rank` / `vec_rank` / `rrf=` / 可选 `proj=`，不可把 keyword 分当作 0～1 语义相关度。
 
@@ -226,7 +233,7 @@ MCP server 启动时：
 
 **决策**：所有写入永久 `infer=false`，显式 `true` 亦被忽略。category 仅作分类标签。
 
-**检索不受影响**：hybrid_search 对 verbatim 入库文本做 embedding，保留标识符反而更利于检索。中文子串匹配问题见 TODO #18，与 infer 无关。
+**检索不受影响**：hybrid_search 对 verbatim 入库文本做 embedding。keyword 增强（子序列/截断等）见架构「混合检索」与设计文档。
 
 ### 本地 LLM vs 远程 LLM（E 策略 merge 去重）
 
@@ -277,7 +284,7 @@ mem0 的 `AnthropicLLM` provider 不会将 `response_format` 参数传递给底�
 - 多表同步依赖 `memory_sync`；Chroma 不在 SQLite 事务内，极端失败时查 `sync_pending/`
 - Hook 超时默认 20 秒，Ollama 响应慢时可能超时
 - Ollama 未启动时 MCP 无法初始化（embedding 硬依赖 localhost:11434）
-- 中文关键词子串匹配弱（如「下雨」≠「下大雨」），待 #18 条件子序列
+- 库变大（数千条）时可评估 SQLite FTS5 / rerank（TODO #43）
 
 ## 相关文档
 

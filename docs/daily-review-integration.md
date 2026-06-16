@@ -146,4 +146,5 @@ Claude Code cron 有生命周期限制。每日复盘 cron（`3 18 * * *`）在 
 
 ## 已知待办（mem0 质量）
 
-- hybrid_search 中文子串匹配（「下雨」≠「下大雨」）（#18）
+- hybrid_search rerank 层（#43，库变大后再评估）
+- episodic 清理标准规范（#38）

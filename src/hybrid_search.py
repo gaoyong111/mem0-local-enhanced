@@ -9,6 +9,8 @@ import sqlite3
 import urllib.request
 from typing import Any
 
+from mem0_add_policy import normalize_category  # noqa: E402
+
 CONFIG_PATH = os.path.expanduser('~/.mem0/config_local.json')
 DEFAULT_USER = os.getenv('MEM0_DEFAULT_USER_ID', os.getenv('MEM0_USER_ID', 'default-user'))
 HISTORY_DB = os.path.expanduser('~/.mem0/history.db')
@@ -21,16 +23,32 @@ RRF_RECALL_TOP_K = 50
 # 加权 RRF：score = 1/(K+vec_rank) + α·1/(K+kw_rank) [+ β 双路都命中]
 RRF_K = 15
 RRF_KW_WEIGHT = 0.5
-RRF_BOTH_BONUS = 0.008
+RRF_BOTH_BONUS = 0.0  # 双路 RRF 相加已表达共识；实测 +0.008 不改变 top5
+
+# Phase 4 keyword 增强（#18 Batch 1）
+TF_CAP = 3
+PRIMARY_CJK_MAX_LEN = 6
+SUBSEQ_RATIO = 0.5
+SUBSEQ_VEC_GATE_MIN = 15
+SUBSEQ_VEC_GATE_MAX = 30
+
+# Phase 4D：keyword 相对截断 kw_score < top1 × ratio 不进池；0 或 MEM0_KW_REL_RATIO=0 关闭
+KW_RELATIVE_RATIO = float(os.getenv('MEM0_KW_REL_RATIO', '0.25'))
 
 # project 配额：RRF 上加匹配奖励分，再 project 前 3 + 全局保底 2
 RRF_PROJECT_BONUS = 0.005
+PREFERENCE_CROSS_BONUS = 0.008
 PROJECT_QUOTA_TOP = 3
+PROJECT_QUOTA_MIN_RRF = 0.03
 GLOBAL_QUOTA_MIN = 2
 
 # Phase 3 lang 分轨：中文 query 排除纯英文记忆
 _CJK_RE = re.compile(r'[一-鿿]')
 LANG_VECTOR_OVERSAMPLE = 4
+
+# 向量相对阈值：vec_score < top1 - δ 视为未命中（不进 vector_results → vec_rank=0）
+# 设 0 或环境变量 MEM0_VECTOR_REL_MARGIN=0 可关闭
+VECTOR_SCORE_REL_MARGIN = float(os.getenv('MEM0_VECTOR_REL_MARGIN', '0.10'))
 
 GENERIC_DIR_NAMES = frozenset({
     'Desktop', 'Documents', 'Home', 'home', 'Downloads', 'src', 'code', 'projects', 'tmp',
@@ -118,13 +136,17 @@ def should_exclude_lang_en(query: str, text: str, metadata_lang: str = '') -> bo
 
 
 def extract_keywords(query: str) -> list[str]:
-    """从查询中提取中英文关键词。中文用滑动窗口提取2-4字词组，避免单字噪音和整句匹配。"""
+    """从查询中提取中英文关键词。中文滑窗 2–4 字 + 最长中文段（≤6 字）作主 keyword。"""
     keywords: list[str] = []
-    for segment in re.findall(r"[一-鿿]+", query):
+    cjk_segments = re.findall(r'[一-鿿]+', query)
+    for segment in cjk_segments:
+        if len(segment) >= 2:
+            primary = segment[:PRIMARY_CJK_MAX_LEN]
+            keywords.append(primary)
         for size in range(2, min(5, len(segment) + 1)):
             for i in range(len(segment) - size + 1):
                 keywords.append(segment[i:i + size])
-    keywords.extend(re.findall(r"[a-zA-Z0-9_]+", query.lower()))
+    keywords.extend(re.findall(r'[a-zA-Z0-9_]+', query.lower()))
     seen: set[str] = set()
     unique: list[str] = []
     for keyword in keywords:
@@ -133,6 +155,108 @@ def extract_keywords(query: str) -> list[str]:
             seen.add(key)
             unique.append(keyword)
     return unique
+
+
+def primary_cjk_keyword(query: str) -> str:
+    """query 中最长连续中文段，上限 PRIMARY_CJK_MAX_LEN（4G 子序列仅对此触发）。"""
+    segments = re.findall(r'[一-鿿]+', query)
+    if not segments:
+        return ''
+    segment = max(segments, key=len)
+    if len(segment) < 2:
+        return ''
+    return segment[:PRIMARY_CJK_MAX_LEN]
+
+
+def _is_cjk_keyword(keyword: str) -> bool:
+    """纯中文 2–4 字 keyword（子序列触发条件）。"""
+    if not keyword or len(keyword) < 2 or len(keyword) > 4:
+        return False
+    return bool(_CJK_RE.search(keyword)) and not re.search(r'[a-zA-Z]', keyword)
+
+
+def _subseq_vec_gate(memory_count: int) -> int:
+    """4G vec_rank 门控：clamp(round(0.2×N), 15, 30)。"""
+    if memory_count <= 0:
+        return SUBSEQ_VEC_GATE_MAX
+    return max(SUBSEQ_VEC_GATE_MIN, min(SUBSEQ_VEC_GATE_MAX, round(0.2 * memory_count)))
+
+
+def _subsequence_hit(text: str, keyword: str) -> bool:
+    """字符按序出现，最大跨度 ≤ len(keyword)+1。"""
+    if not keyword:
+        return False
+    max_span = len(keyword) + 1
+    ti = 0
+    positions: list[int] = []
+    for ch in keyword:
+        found = text.find(ch, ti)
+        if found < 0:
+            return False
+        positions.append(found)
+        ti = found + 1
+    return positions[-1] - positions[0] <= max_span
+
+
+def _ranges_overlap(start: int, end: int, occupied: list[tuple[int, int]]) -> bool:
+    """区间是否与已占区间重叠。"""
+    return any(not (end <= occ_start or start >= occ_end) for occ_start, occ_end in occupied)
+
+
+def _non_overlapping_hits(text_lower: str, keyword_lower: str, occupied: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """在 text 中找不与 occupied 重叠的 keyword 出现位置。"""
+    hits: list[tuple[int, int]] = []
+    start = 0
+    while start <= len(text_lower) - len(keyword_lower):
+        pos = text_lower.find(keyword_lower, start)
+        if pos < 0:
+            break
+        end = pos + len(keyword_lower)
+        if not _ranges_overlap(pos, end, occupied):
+            hits.append((pos, end))
+        start = pos + 1
+    return hits
+
+
+def _best_match_keyword_score(text_lower: str, keywords: list[str]) -> float:
+    """4A 最长命中优先 + 4C TF cap：去重叠子串计分。"""
+    occupied: list[tuple[int, int]] = []
+    score = 0.0
+    for keyword in sorted(keywords, key=len, reverse=True):
+        keyword_lower = keyword.lower()
+        if not keyword_lower:
+            continue
+        hits = _non_overlapping_hits(text_lower, keyword_lower, occupied)
+        if not hits:
+            continue
+        count = min(len(hits), TF_CAP)
+        weight = min(len(keyword_lower), 5)
+        score += count * weight
+        occupied.extend(hits)
+    return score
+
+
+def _keyword_score_for_memory(
+    text: str,
+    keywords: list[str],
+    primary_kw: str,
+    *,
+    vec_rank: int = 0,
+    vec_gate: int = SUBSEQ_VEC_GATE_MAX,
+) -> float:
+    """单条记忆 keyword 分：子串去重叠 + 条件子序列弱分。"""
+    text_lower = text.lower()
+    score = _best_match_keyword_score(text_lower, keywords)
+
+    if not primary_kw or not _is_cjk_keyword(primary_kw):
+        return score
+    if primary_kw.lower() in text_lower:
+        return score
+    if vec_rank <= 0 or vec_rank > vec_gate:
+        return score
+    if _subsequence_hit(text, primary_kw):
+        score += min(len(primary_kw), 5) * SUBSEQ_RATIO
+    return score
 
 
 def _load_deleted_memory_ids(conn: sqlite3.Connection | None = None) -> set[str]:
@@ -185,13 +309,17 @@ def keyword_search(
     top_k: int = DEFAULT_TOP_K,
     *,
     filter_lang_en: bool = False,
+    vec_rank_map: dict[str, int] | None = None,
 ) -> list[dict[str, Any]]:
-    """关键词匹配 history 最终记忆文本。"""
+    """关键词匹配活跃记忆；4G 子序列依赖 vec_rank_map（须先 vector_search）。"""
     keywords = extract_keywords(query)
     if not keywords:
         return []
 
+    primary_kw = primary_cjk_keyword(query)
+    vec_rank_map = vec_rank_map or {}
     final_memories = _load_final_memories()
+    vec_gate = _subseq_vec_gate(len(final_memories))
     metadata_map = _load_memory_metadata()
     scored: list[dict[str, Any]] = []
 
@@ -200,15 +328,13 @@ def keyword_search(
         if filter_lang_en and should_exclude_lang_en(query, text, meta.get('lang', '')):
             continue
 
-        score = 0.0
-        text_lower = text.lower()
-        for keyword in keywords:
-            keyword_lower = keyword.lower()
-            count = text_lower.count(keyword_lower)
-            if count > 0:
-                weight = min(len(keyword_lower), 5)
-                score += count * weight
-
+        score = _keyword_score_for_memory(
+            text,
+            keywords,
+            primary_kw,
+            vec_rank=vec_rank_map.get(memory_id, 0),
+            vec_gate=vec_gate,
+        )
         if score <= 0:
             continue
 
@@ -225,7 +351,45 @@ def keyword_search(
         })
 
     scored.sort(key=lambda item: item['score'], reverse=True)
+    scored = _apply_keyword_relative_cutoff(scored)
     return scored[:top_k]
+
+
+def _apply_keyword_relative_cutoff(
+    results: list[dict[str, Any]],
+    ratio: float | None = None,
+) -> list[dict[str, Any]]:
+    """4D：kw_score < top1 × ratio 截断，弱命中不进 RRF（kw_rank=0）。至少保留 top1。"""
+    rel_ratio = KW_RELATIVE_RATIO if ratio is None else ratio
+    if rel_ratio <= 0 or not results:
+        return results
+
+    top_score = float(results[0].get('keyword_score', results[0].get('score', 0)) or 0)
+    if top_score <= 0:
+        return results
+
+    cutoff = top_score * rel_ratio
+    filtered = [
+        item for item in results
+        if float(item.get('keyword_score', item.get('score', 0)) or 0) >= cutoff
+    ]
+    return filtered if filtered else results[:1]
+
+
+def _apply_vector_relative_threshold(
+    results: list[dict[str, Any]],
+    margin: float | None = None,
+) -> list[dict[str, Any]]:
+    """按 top1 - δ 截断向量路：低于阈值的条目不进 RRF（vec_rank=0）。至少保留 top1。"""
+    delta = VECTOR_SCORE_REL_MARGIN if margin is None else margin
+    if delta <= 0 or not results:
+        return results
+
+    results.sort(key=lambda item: item['score'], reverse=True)
+    top_score = float(results[0].get('vector_score', results[0].get('score', 0)) or 0)
+    cutoff = top_score - delta
+    filtered = [item for item in results if float(item.get('vector_score', item.get('score', 0)) or 0) >= cutoff]
+    return filtered if filtered else results[:1]
 
 
 def vector_search(
@@ -301,10 +465,10 @@ def vector_search(
                 'category': (meta or {}).get('category', '') or '',
                 'lang': lang,
             })
-            if len(results) >= top_k:
+            if len(results) >= n_results:
                 break
 
-        results.sort(key=lambda item: item['score'], reverse=True)
+        results = _apply_vector_relative_threshold(results)
         return results[:top_k]
     except Exception:
         return []
@@ -341,14 +505,21 @@ def _rank_key(item: dict[str, Any]) -> tuple:
     )
 
 
-def _apply_project_scoring(merged: list[dict[str, Any]], project: str) -> None:
-    """就地写入 rrf_score / project_bonus / score（RRF + 项目匹配奖励）。"""
+def _is_preference_memory(item: dict[str, Any]) -> bool:
+    """category=preference 的记忆（规范化后判断）。"""
+    return normalize_category(str(item.get('category', '') or '')) == 'preference'
+
+
+def _apply_result_bonuses(merged: list[dict[str, Any]], project: str = '') -> None:
+    """就地写入 rrf_score / project_bonus / preference_bonus / score。"""
     for item in merged:
         rrf_score = float(item.get('score', 0) or 0)
-        bonus = RRF_PROJECT_BONUS if _project_matches(item.get('project', ''), project) else 0.0
+        project_bonus = RRF_PROJECT_BONUS if project and _project_matches(item.get('project', ''), project) else 0.0
+        preference_bonus = PREFERENCE_CROSS_BONUS if _is_preference_memory(item) else 0.0
         item['rrf_score'] = rrf_score
-        item['project_bonus'] = bonus
-        item['score'] = rrf_score + bonus
+        item['project_bonus'] = project_bonus
+        item['preference_bonus'] = preference_bonus
+        item['score'] = rrf_score + project_bonus + preference_bonus
 
 
 def _pick_with_project_quota(
@@ -356,7 +527,7 @@ def _pick_with_project_quota(
     project: str,
     max_results: int,
 ) -> list[dict[str, Any]]:
-    """project 前 PROJECT_QUOTA_TOP 直保 + 全局 GLOBAL_QUOTA_MIN 保底，余量按 score 填充。"""
+    """project 达标直保 + 全局保底，余量按 score 填充。直保要求 rrf_score >= PROJECT_QUOTA_MIN_RRF。"""
     project_pool = sorted(
         [item for item in merged if _project_matches(item.get('project', ''), project)],
         key=_rank_key,
@@ -372,7 +543,11 @@ def _pick_with_project_quota(
     picked: list[dict[str, Any]] = []
     picked_ids: set[str] = set()
 
-    for item in project_pool[:PROJECT_QUOTA_TOP]:
+    eligible_project = [
+        item for item in project_pool
+        if float(item.get('rrf_score', 0) or 0) >= PROJECT_QUOTA_MIN_RRF
+    ]
+    for item in eligible_project[:PROJECT_QUOTA_TOP]:
         picked.append(item)
         picked_ids.add(item['id'])
 
@@ -441,13 +616,10 @@ def merge_and_rank(
 
     merged.sort(key=_rank_key)
 
+    _apply_result_bonuses(merged, project)
     if not project:
-        for item in merged:
-            item['rrf_score'] = float(item.get('score', 0) or 0)
-            item['project_bonus'] = 0.0
         return _attach_rank(merged[:max_results])
 
-    _apply_project_scoring(merged, project)
     return _attach_rank(_pick_with_project_quota(merged, project, max_results))
 
 
@@ -465,8 +637,14 @@ def hybrid_search(
 
     recall_k = max(top_k, RRF_RECALL_TOP_K)
     filter_lang_en = query_has_cjk(query)
-    keyword_results = keyword_search(query, top_k=recall_k, filter_lang_en=filter_lang_en)
     vector_results = vector_search(query, top_k=recall_k, filter_lang_en=filter_lang_en)
+    vec_rank_map = {item['id']: rank for rank, item in enumerate(vector_results, start=1)}
+    keyword_results = keyword_search(
+        query,
+        top_k=recall_k,
+        filter_lang_en=filter_lang_en,
+        vec_rank_map=vec_rank_map,
+    )
     return merge_and_rank(
         keyword_results,
         vector_results,
@@ -543,10 +721,16 @@ def format_mcp_search_output(results: list[dict[str, Any]]) -> str:
         vector_score = float(item.get('vector_score', 0) or 0)
         rrf_score = float(item.get('rrf_score', item.get('score', 0)) or 0)
         project_bonus = float(item.get('project_bonus', 0) or 0)
+        preference_bonus = float(item.get('preference_bonus', 0) or 0)
         kw_rank = int(item.get('keyword_rank', 0) or 0)
         vec_rank = int(item.get('vector_rank', 0) or 0)
         rank_prefix = f'#{rank} ' if rank else ''
-        bonus_part = f' proj=+{project_bonus:.4f}' if project_bonus > 0 else ''
+        bonus_parts = []
+        if project_bonus > 0:
+            bonus_parts.append(f'proj=+{project_bonus:.4f}')
+        if preference_bonus > 0:
+            bonus_parts.append(f'pref=+{preference_bonus:.4f}')
+        bonus_part = (' ' + ' '.join(bonus_parts)) if bonus_parts else ''
         lines.append(
             f'{rank_prefix}[{item.get("id", "")}] {scope_tag} ({source}) '
             f'kw={keyword_score:.2f} vec={vector_score:.2f} '

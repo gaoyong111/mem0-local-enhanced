@@ -199,6 +199,101 @@ def collect_ancestor_ids(memory_id: str, *, max_depth: int = 8) -> list[str]:
     return ancestors
 
 
+def get_direct_merge_source_ids(memory_id: str) -> list[str]:
+    """本条记忆的直接合并来源 ID（不展开整条祖先链）。"""
+    result: list[str] = []
+
+    def add(source_id: str) -> None:
+        if source_id and source_id not in result:
+            result.append(source_id)
+
+    for source_id in _chroma_merged_from(memory_id):
+        add(source_id)
+
+    for entry in _load_lineage_entries():
+        if entry.get('memory_id') != memory_id:
+            continue
+        if entry.get('action') not in ('MERGE', 'GROOMING'):
+            continue
+        for source_id in entry.get('source_ids') or []:
+            add(str(source_id or ''))
+
+    return result
+
+
+def resolve_memory_snapshot(memory_id: str) -> dict[str, Any]:
+    """读取记忆快照：优先 active，其次 deleted_archive，最后 history 预览。"""
+    from memory_delete import get_deleted_record
+    from memory_sync import get_active_record
+
+    base: dict[str, Any] = {
+        'id': memory_id,
+        'status': 'missing',
+        'content': '',
+        'project': '',
+        'category': '',
+        'deleted_at': '',
+        'reason': '',
+        'note': '',
+    }
+
+    active = get_active_record(memory_id)
+    if active:
+        return {
+            **base,
+            'status': 'active',
+            'content': str(active.get('content', '') or ''),
+            'project': str(active.get('project', '') or ''),
+            'category': str(active.get('category', '') or ''),
+        }
+
+    deleted = get_deleted_record(memory_id)
+    if deleted:
+        return {
+            **base,
+            'status': 'deleted',
+            'content': str(deleted.get('content', '') or ''),
+            'project': str(deleted.get('project', '') or ''),
+            'category': str(deleted.get('category', '') or ''),
+            'deleted_at': str(deleted.get('deleted_at', '') or ''),
+            'reason': str(deleted.get('reason', '') or ''),
+        }
+
+    for event in reversed(_history_events(memory_id)):
+        preview = str(event.get('content_preview', '') or '')
+        if preview:
+            return {
+                **base,
+                'status': 'history',
+                'content': preview,
+                'note': '仅 history.db 预览，完整正文可能已不可恢复',
+            }
+
+    return base
+
+
+def build_merge_source_tree(
+    memory_id: str,
+    *,
+    visited: set[str] | None = None,
+) -> list[dict[str, Any]]:
+    """递归构建合并来源树；来源若本身由合并产生，继续展开子来源。"""
+    visited = visited or set()
+    if memory_id in visited:
+        return []
+    visited.add(memory_id)
+
+    tree: list[dict[str, Any]] = []
+    for source_id in get_direct_merge_source_ids(memory_id):
+        if source_id in visited:
+            continue
+        node = resolve_memory_snapshot(source_id)
+        child_visited = set(visited)
+        node['sources'] = build_merge_source_tree(source_id, visited=child_visited)
+        tree.append(node)
+    return tree
+
+
 def build_timeline(memory_id: str, *, include_ancestors: bool = True) -> dict[str, Any]:
     """合并 history.db、lineage.jsonl 与 deleted_archive.db，返回时间线及上游 ID。"""
     lineage_entries = _load_lineage_entries()
@@ -234,7 +329,7 @@ def build_timeline(memory_id: str, *, include_ancestors: bool = True) -> dict[st
         seen_keys.add(key)
         deduped.append(item)
 
-    deduped.sort(key=lambda row: row.get('ts', ''))
+    deduped.sort(key=lambda row: row.get('ts', ''), reverse=True)
 
     ancestors = collect_ancestor_ids(memory_id) if include_ancestors else []
     ancestor_timelines: dict[str, list[dict[str, Any]]] = {}
@@ -250,6 +345,7 @@ def build_timeline(memory_id: str, *, include_ancestors: bool = True) -> dict[st
         'events': deduped,
         'ancestor_ids': ancestors,
         'ancestor_timelines': ancestor_timelines,
+        'merge_sources': build_merge_source_tree(memory_id),
     }
 
 

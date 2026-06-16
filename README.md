@@ -12,7 +12,7 @@
 
 | 场景 | 官方局限 | 本方案增强 |
 |------|----------|-----------|
-| 中文 + 技术标识符检索 | 纯向量检索，camelCase / 中文关键词召回率低 | **混合检索**（关键词 history.db + 向量 bge-m3） |
+| 中文 + 技术标识符检索 | 纯向量检索，camelCase / 中文关键词召回率低 | **混合检索**（向量 bge-m3 为主 + keyword 补精确词；加权 RRF 融合） |
 | 中文记忆入库 | `use_input_language` 不可靠，infer 易英文化 | **B/C/D/E 写入策略**：分类分流、中文锁、结构化、LLM 去重 |
 | IDE 上下文注入 | 有 MCP 但无每次输入自动搜索注入 | **Hook + MCP**，Claude Code / Cursor 零干预注入 |
 | 记忆运维 | 写入失败无兜底、无复盘反哺 | **pending 队列 + 每日复盘 cron + 快照 diff** |
@@ -33,7 +33,7 @@
 
 ### 检索与写入
 
-- **混合检索**：关键词 + 向量双路召回，项目记忆优先，排除 DELETE 幽灵记忆
+- **混合检索**：先向量后 keyword 串行召回 → 加权 RRF（K=15）；中文 query 排除 `lang=en`；keyword 支持子序列补进池、去重叠、相对截断；项目配额优先
 - **B 分类标签**：五类规范（episodic/behavior/workflow/reference/preference），写入自动规范化，mem_viewer 按类筛选/上色
 - **C 中文锁定**：patch `use_input_language`（infer 路径已关闭）
 - **D 结构化格式**：`[module] field: rule（关键词: …）` 提升命中率
@@ -45,7 +45,7 @@
 - **pending 兜底**：写入失败 → `~/.mem0/pending/`，复盘或 retry_pending 重试
 - **LLM 兜底**：主配置失败自动切 `config_ollama.json`
 - **Hook 注入**：Claude `UserPromptSubmit` + Cursor `beforeSubmitPrompt`
-- **mem_viewer**：Flask + vis.js 图谱；category 筛选/上色、混合检索结果面板（score+source）、演变时间线
+- **mem_viewer**：Flask + vis.js 图谱；category 筛选/上色、混合检索结果面板（score+source）、演变时间线；**手动新增/编辑**记忆（正文扩写重嵌向量、project/category）、相似记忆预警
 - **memory_lineage**：`lineage.jsonl` 记录 MERGE/DEDUP/DELETE，grooming 合并须带 `merged_from`
 
 ### 每日复盘闭环（Claude Code cron）
@@ -142,7 +142,7 @@ cp configs/config_ollama.example.json ~/.mem0/config_ollama.json
 
 ## 可视化 Web UI
 
-`mem_viewer.py` — 图谱浏览记忆：category 筛选/上色、混合检索结果面板（score+source，与 MCP 同算法）、演变时间线、厚度指标、删除。
+`mem_viewer.py` — 图谱浏览记忆：category 筛选/上色、混合检索结果面板（score+source，与 MCP 同算法）、演变时间线、厚度指标、删除；**新增/编辑**记忆（`/api/add`、`/api/update`，扩写时重嵌向量；写入前 `/api/similar` 相似预警）。
 
 设计规格 → [docs/superpowers/specs/2026-06-01-mem-viewer-design.md](docs/superpowers/specs/2026-06-01-mem-viewer-design.md)
 
@@ -184,11 +184,13 @@ mem0-local-enhanced/          # 本仓库（源码 + 文档）
 | `MEM0_CONFIG` | `~/.mem0/config_local.json` | 主配置 |
 | `MEM0_FALLBACK_CONFIG` | `~/.mem0/config_ollama.json` | 备用配置 |
 | `MEM0_USER_ID` | `default-user` | 用户标识 |
+| `MEM0_VECTOR_REL_MARGIN` | `0.10` | 向量相对阈值；设 `0` 关闭 |
+| `MEM0_KW_REL_RATIO` | `0.25` | keyword 相对截断；设 `0` 关闭 |
 
 ## 已知限制
 
 - Ollama 必须常驻，重启 Mac 后需手动启动或配置登录项
-- 中文关键词子串匹配弱（「下雨」≠「下大雨」）
+- 跨词同义（如淋雨↔下雨）依赖向量路，keyword 不维护同义词表
 - AnthropicLLM provider 不传递 `response_format`（infer/merge 受影响）
 - Chroma metadata 仅支持标量，嵌套 dict 需 `structured_json` 序列化
 
