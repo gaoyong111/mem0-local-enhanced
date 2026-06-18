@@ -214,6 +214,25 @@ add 失败时 MCP 写入 `~/.mem0/pending/*.json`（与复盘兜底**同一路�
 
 grooming 合并写入时 metadata 须带 `merged_from`（来源 ID）。mem_viewer 详情面板「演变时间线」可查看并点击上游 ID。
 
+## episodic 人机梳理（2026-06）
+
+episodic 不自动删/合/升，AI 只写建议，用户在 mem_viewer 或对话中确认。
+
+| 字段 / 文件 | 含义 |
+|-------------|------|
+| `grooming_pending=1` | 待确认 episodic（新写入 episodic 自动打上） |
+| `grooming_action` | `keep` / `delete` / `promote`（**不含 merge**） |
+| `grooming_reason` | AI 理由 |
+| `grooming_target_category` | promote 目标 category |
+| `grooming_at` | 建议生成时间 |
+| `~/.mem0/grooming-merge-hints.json` | **当次** merge 建议，下次 grooming **整文件覆盖** |
+
+**确认保留**：写 `grooming_pending=0`（Chroma update 合并 metadata，pop 键无效），保留 action/reason 供追溯。正文或 category 修改时 grooming 字段写空值。
+
+**merge 采纳**：viewer「合并（重校验）」当场 hybrid_search 重验目标，再删 source + target 写 `merged_from`。
+
+批处理脚本：`mem0-local-enhanced/scripts/episodic_grooming_run.py`（复盘 grooming 阶段调用）。MCP 工具 `confirm_grooming` 供 AI 清标记。
+
 MCP server 启动时：
 
 1. 尝试加载主配置（`MEM0_CONFIG` 指定的路径）

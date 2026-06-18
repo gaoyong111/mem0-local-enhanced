@@ -274,6 +274,10 @@ def prepare_add_plan(
     apply_category_metadata(meta)
     apply_lineage_metadata(meta)
     apply_lang_metadata(meta, content.strip())
+    from grooming_metadata import apply_grooming_pending, is_episodic_category
+
+    if is_episodic_category(meta):
+        apply_grooming_pending(meta, pending=True)
     return AddPlan(
         content=content.strip(),
         metadata=meta,

@@ -325,5 +325,45 @@ def retry_pending() -> str:
     return '\n'.join(lines)
 
 
+@mcp.tool()
+def confirm_grooming(memory_id: str) -> str:
+    """确认 episodic 梳理建议（仅清除待确认标记 grooming_pending，不改正文）。
+
+    memory_id: 记忆 ID。用户手动处理完或在 viewer 点「确认保留」后也可调用。
+    """
+    try:
+        from grooming_metadata import clear_grooming_pending, is_grooming_pending, parse_grooming_fields
+
+        import chromadb
+        from hybrid_search import CHROMA_DB_PATH
+
+        client = chromadb.PersistentClient(path=CHROMA_DB_PATH)
+        col = client.get_collection('mem0')
+        raw = col.get(ids=[memory_id], include=['metadatas'])
+        if not raw.get('ids'):
+            return f'记忆不存在: {memory_id}'
+
+        meta = dict((raw.get('metadatas') or [{}])[0] or {})
+        if not is_grooming_pending(meta):
+            grooming = parse_grooming_fields(meta)
+            return f'记忆 {memory_id} 无待确认标记。当前建议: {grooming.get("action") or "无"}'
+
+        clear_grooming_pending(meta)
+        clean = {
+            key: value for key, value in meta.items()
+            if isinstance(value, (str, int, float, bool))
+        }
+        col.update(ids=[memory_id], metadatas=[clean])
+        record_event(
+            'GROOMING',
+            memory_id,
+            note='MCP 确认保留（清除待确认标记）',
+            actor='mcp',
+        )
+        return f'已确认记忆 {memory_id}，待确认标记已清除'
+    except Exception as exc:
+        return f'确认失败: {exc}'
+
+
 if __name__ == '__main__':
     mcp.run()

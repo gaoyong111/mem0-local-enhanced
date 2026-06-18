@@ -35,7 +35,17 @@ from mem0_add_policy import (  # noqa: E402
     normalize_category,
     prepare_add_plan,
 )
-from memory_lineage import build_timeline, record_event  # noqa: E402
+from grooming_episodic import revalidate_merge_target  # noqa: E402
+from grooming_metadata import (  # noqa: E402
+    clear_grooming_pending,
+    clear_grooming_suggestion,
+    is_grooming_pending,
+    merge_hint_for_source,
+    parse_grooming_fields,
+    read_merge_hints,
+    remove_merge_hint,
+)
+from memory_lineage import build_timeline, parse_merged_from, record_event, record_merge_result  # noqa: E402
 
 # 配置
 HOST = 'localhost'
@@ -56,6 +66,24 @@ _PROJECT_COLORS = [
 _GLOBAL_COLOR = '#95a5a6'
 
 
+def _load_chroma_grooming_fields() -> dict[str, dict]:
+    """从 Chroma 读取 grooming_* metadata（active_memories 不含这些字段）。"""
+    try:
+        col = _get_chroma_collection()
+        result = col.get(include=['metadatas'])
+    except Exception:
+        return {}
+
+    grooming_map: dict[str, dict] = {}
+    ids = result.get('ids') or []
+    metas = result.get('metadatas') or []
+    for memory_id, meta in zip(ids, metas):
+        if not meta:
+            continue
+        grooming_map[memory_id] = parse_grooming_fields(meta)
+    return grooming_map
+
+
 def load_all_memories() -> list[dict]:
     """从 active_memories + Chroma 加载全部活跃记忆。"""
     from memory_sync import load_active_memories, load_active_metadata, migrate_active_if_needed
@@ -63,6 +91,8 @@ def load_all_memories() -> list[dict]:
     migrate_active_if_needed()
     text_map = load_active_memories()
     metadata_map = load_active_metadata()
+    grooming_map = _load_chroma_grooming_fields()
+    merge_hints_payload = read_merge_hints()
 
     created_at_map: dict[str, str] = {}
     conn = sqlite3.connect(os.path.expanduser('~/.mem0/active_memories.db'))
@@ -92,6 +122,8 @@ def load_all_memories() -> list[dict]:
         project = '' if raw_project == '全局' else raw_project
         raw_category = str(meta.get('category', '') or '')
         normalized_category = normalize_category(raw_category)
+        grooming = grooming_map.get(memory_id, parse_grooming_fields({}))
+        merge_hint = merge_hint_for_source(memory_id, merge_hints_payload)
         memories.append({
             'id': memory_id,
             'text': text,
@@ -102,6 +134,8 @@ def load_all_memories() -> list[dict]:
             'metadata': meta,
             'created_at': created_at_map.get(memory_id, ''),
             'update_count': update_count_map.get(memory_id, 0),
+            'grooming': grooming,
+            'merge_hint': merge_hint,
         })
 
     return memories
@@ -464,6 +498,7 @@ def update_memory_content(
     new_meta['hash'] = hashlib.md5(content.encode('utf-8')).hexdigest()
     apply_category_metadata(new_meta)
     apply_lang_metadata(new_meta, content)
+    clear_grooming_suggestion(new_meta)
 
     embedding = embed_text(content)
     col.update(ids=[memory_id], embeddings=[embedding], metadatas=[_sanitize_chroma_metadata(new_meta)])
@@ -483,6 +518,114 @@ def update_memory_content(
         'category': new_category,
         'category_label': CATEGORY_LABELS.get(new_category, new_category),
         'category_raw': str(new_meta.get('category_raw', '') or ''),
+    }
+
+
+def _read_chroma_meta(memory_id: str) -> dict:
+    col = _get_chroma_collection()
+    result = col.get(ids=[memory_id], include=['metadatas'])
+    ids = result.get('ids') or []
+    if not ids:
+        raise ValueError(f'记忆不存在: {memory_id}')
+    return dict((result.get('metadatas') or [{}])[0] or {})
+
+
+def _write_chroma_meta(memory_id: str, meta: dict) -> None:
+    col = _get_chroma_collection()
+    col.update(ids=[memory_id], metadatas=[_sanitize_chroma_metadata(meta)])
+
+
+def confirm_grooming_memory(memory_id: str) -> dict:
+    """确认保留：仅清除 grooming_pending。"""
+    meta = _read_chroma_meta(memory_id)
+    if not is_grooming_pending(meta):
+        return {'changed': False, 'grooming': parse_grooming_fields(meta)}
+
+    clear_grooming_pending(meta)
+    _write_chroma_meta(memory_id, meta)
+    record_event(
+        'GROOMING',
+        memory_id,
+        note='viewer 确认保留（清除待确认标记）',
+        actor='mem_viewer',
+    )
+    return {'changed': True, 'grooming': parse_grooming_fields(meta)}
+
+
+def execute_grooming_promote(memory_id: str) -> dict:
+    """采纳升类建议。"""
+    meta = _read_chroma_meta(memory_id)
+    grooming = parse_grooming_fields(meta)
+    target = grooming.get('target_category', '')
+    if grooming.get('action') != 'promote' or not target:
+        raise ValueError('当前记忆无 promote 建议')
+
+    return update_memory_metadata(memory_id, category=target)
+
+
+def execute_grooming_merge(source_id: str, hinted_target_id: str = '') -> dict:
+    """合并（重校验）：删除 source，target 追加 merged_from。"""
+    from memory_delete import archive_delete
+    from memory_sync import SyncError, get_active_record
+
+    source = get_active_record(source_id)
+    if not source:
+        raise ValueError(f'源记忆不存在: {source_id}')
+
+    source_text = str(source.get('content', '') or '')
+    project = normalize_project(str(source.get('project', '') or ''))
+    validated = revalidate_merge_target(
+        source_id,
+        source_text,
+        project,
+        hinted_target_id,
+        hybrid_search_fn=hybrid_search,
+    )
+    if not validated:
+        raise ValueError('重校验未找到合适合并目标，请手动处理')
+
+    target_id = str(validated.get('id', '') or '')
+    if not target_id or target_id == source_id:
+        raise ValueError('合并目标无效')
+
+    target_record = get_active_record(target_id)
+    if not target_record:
+        raise ValueError(f'目标记忆不存在: {target_id}')
+
+    target_meta = _read_chroma_meta(target_id)
+    merged_sources = parse_merged_from(target_meta)
+    if source_id not in merged_sources:
+        merged_sources.append(source_id)
+    target_meta['merged_from'] = ','.join(merged_sources)
+    apply_category_metadata(target_meta)
+    _write_chroma_meta(target_id, target_meta)
+
+    reason = f'grooming 合并至 {target_id[:8]}…（overlap={validated.get("overlap", 0):.2f}）'
+    try:
+        archive_delete(
+            source_id,
+            reason,
+            actor='mem_viewer',
+            source='grooming_merge',
+        )
+    except SyncError as error:
+        raise ValueError(f'删除源记忆同步失败: {error}') from error
+
+    record_merge_result(
+        target_id,
+        [source_id],
+        category=str(target_record.get('category', '') or ''),
+        note=reason,
+        content_preview=source_text,
+        actor='mem_viewer',
+    )
+    remove_merge_hint(source_id)
+    return {
+        'ok': True,
+        'source_id': source_id,
+        'target_id': target_id,
+        'overlap': validated.get('overlap', 0),
+        'target_changed': target_id != hinted_target_id,
     }
 
 
@@ -535,6 +678,22 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
   .btn-save-content.visible { display:inline-block; }
   .btn-cancel-content { background:#7f8c8d; color:#fff; padding:6px 14px; border:none; border-radius:6px; cursor:pointer; font-size:13px; display:none; }
   .btn-cancel-content.visible { display:inline-block; }
+
+  .grooming-section { border:1px solid #f39c12; border-radius:8px; padding:12px; background:#1a1a2e; }
+  .grooming-pending-badge { display:inline-block; padding:2px 8px; border-radius:4px; background:#4a3a20; color:#f39c12; font-size:11px; margin-left:6px; }
+  .grooming-action { display:inline-block; padding:2px 8px; border-radius:4px; font-size:12px; font-weight:600; margin-bottom:8px; }
+  .grooming-action.delete { background:#4a2020; color:#e74c3c; }
+  .grooming-action.promote { background:#1e3a4a; color:#3498db; }
+  .grooming-action.keep { background:#2c3e2c; color:#2ecc71; }
+  .grooming-action.merge { background:#3d3520; color:#f39c12; }
+  .grooming-reason { font-size:13px; line-height:1.5; color:#e0e0e0; white-space:pre-wrap; margin-bottom:10px; }
+  .grooming-meta { font-size:11px; color:#7f8c8d; margin-bottom:10px; }
+  .grooming-actions { display:flex; gap:8px; flex-wrap:wrap; }
+  .grooming-actions button { padding:6px 12px; border:none; border-radius:6px; cursor:pointer; font-size:12px; }
+  .btn-grooming-confirm { background:#2ecc71; color:#fff; }
+  .btn-grooming-promote { background:#3498db; color:#fff; }
+  .btn-grooming-delete { background:#e74c3c; color:#fff; }
+  .btn-grooming-merge { background:#f39c12; color:#1a1a2e; }
 
   .search-results { padding:8px 16px; background:#16213e; border-bottom:1px solid #0f3460; max-height:220px; overflow-y:auto; display:none; }
   .search-results.visible { display:block; }
@@ -622,6 +781,10 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
     {% for cat, label in category_items %}
     <option value="{{ cat }}">{{ label }}</option>
     {% endfor %}
+  </select>
+  <select id="grooming-filter">
+    <option value="">全部记忆</option>
+    <option value="pending">待确认 episodic ({{ pending_grooming_count }})</option>
   </select>
   <button class="btn-search" onclick="doSearch()">搜索</button>
   <button class="btn-add" onclick="openAddModal()">+ 新增记忆</button>
@@ -721,6 +884,15 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
       <div class="detail-meta" id="detail-created"></div>
       <button class="btn-save" id="btn-save" onclick="saveMetadata()">保存</button>
     </div>
+    <div class="detail-section" id="grooming-section" style="display:none">
+      <div class="detail-label">AI 梳理建议 <span id="grooming-pending-badge" class="grooming-pending-badge" style="display:none">待确认</span></div>
+      <div class="grooming-section">
+        <div id="grooming-action-badge"></div>
+        <div class="grooming-reason" id="grooming-reason"></div>
+        <div class="grooming-meta" id="grooming-meta"></div>
+        <div class="grooming-actions" id="grooming-actions"></div>
+      </div>
+    </div>
     <div class="detail-section">
       <div class="detail-label">演变时间线</div>
       <div class="detail-meta timeline-hint">合并来源：展示并入本条的原记忆正文；若来源本身由合并产生会继续展开</div>
@@ -757,6 +929,7 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
   const edgesData = {{ edges_json | safe }};
   const memoriesMap = {{ memories_map_json | safe }};
   const thicknessMap = {{ thickness_json | safe }};
+  const mergeHintsPayload = {{ merge_hints_json | safe }};
   let selectedId = null;
   const deletedNodeIds = new Set();
   let lastSearchResults = [];
@@ -767,7 +940,9 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
   const edges = new vis.DataSet(edgesData);
   // 保存节点原始颜色，用于重置还原
   const originalNodeColors = {};
-  nodesData.forEach(n => { originalNodeColors[n.id] = n.color; });
+  nodesData.forEach(n => {
+    originalNodeColors[n.id] = (n.color && n.color.background) ? n.color.background : n.color;
+  });
   const container = document.getElementById('graph-container');
   const options = {
     nodes: { shape: 'dot', font: { size: 11, color: '#e0e0e0' }, borderWidth: 1, borderWidthSelected: 3 },
@@ -804,7 +979,195 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
       changeEmoji + ' 变更:' + thick.change + '  |  连接:' + thick.connection + '  |  重复:' + thick.repetition;
     document.getElementById('detail-id').textContent = id;
     document.getElementById('detail-panel').classList.add('visible');
+    renderGroomingPanel(mem);
     loadTimeline(id);
+  }
+
+  function renderGroomingPanel(mem) {
+    const section = document.getElementById('grooming-section');
+    const badge = document.getElementById('grooming-pending-badge');
+    const actionEl = document.getElementById('grooming-action-badge');
+    const reasonEl = document.getElementById('grooming-reason');
+    const metaEl = document.getElementById('grooming-meta');
+    const actionsEl = document.getElementById('grooming-actions');
+
+    const grooming = mem.grooming || {};
+    const mergeHint = mem.merge_hint || null;
+    const hasSuggestion = grooming.action || grooming.reason || mergeHint;
+    if (!hasSuggestion && !grooming.pending) {
+      section.style.display = 'none';
+      return;
+    }
+
+    section.style.display = '';
+    badge.style.display = grooming.pending ? 'inline-block' : 'none';
+
+    let actionHtml = '';
+    if (grooming.action) {
+      actionHtml += '<span class="grooming-action ' + grooming.action + '">' +
+        (grooming.action_label || grooming.action) + '</span> ';
+    }
+    if (mergeHint) {
+      actionHtml += '<span class="grooming-action merge">合并 → ' + (mergeHint.target_id || '').slice(0, 8) + '...</span>';
+    }
+    actionEl.innerHTML = actionHtml;
+
+    const reasonParts = [];
+    if (grooming.reason) reasonParts.push(grooming.reason);
+    if (mergeHint && mergeHint.reason) reasonParts.push('[当次合并] ' + mergeHint.reason);
+    reasonEl.textContent = reasonParts.join('\\n\\n') || '暂无建议说明';
+
+    const metaParts = [];
+    if (grooming.at) metaParts.push('建议时间: ' + grooming.at);
+    if (grooming.target_category) metaParts.push('升类目标: ' + grooming.target_category);
+    if (mergeHintsPayload.generated_at) metaParts.push('合并报告: ' + mergeHintsPayload.generated_at);
+    metaEl.textContent = metaParts.join(' · ');
+
+    actionsEl.innerHTML = '';
+    if (grooming.pending) {
+      actionsEl.innerHTML += '<button class="btn-grooming-confirm" onclick="confirmGroomingKeep()">确认保留</button>';
+    }
+    if (grooming.action === 'promote' && grooming.target_category) {
+      actionsEl.innerHTML += '<button class="btn-grooming-promote" onclick="applyGroomingPromote()">采纳升类</button>';
+    }
+    if (grooming.action === 'delete') {
+      actionsEl.innerHTML += '<button class="btn-grooming-delete" onclick="applyGroomingDelete()">采纳删除</button>';
+    }
+    if (mergeHint && mergeHint.target_id) {
+      actionsEl.innerHTML += '<button class="btn-grooming-merge" onclick="applyGroomingMerge()">合并（重校验）</button>';
+      actionsEl.innerHTML += '<button class="btn-grooming-confirm" onclick="jumpToMemory(\\'' + mergeHint.target_id + '\\')">定位目标</button>';
+    }
+  }
+
+  function countPendingGrooming() {
+    return Object.values(memoriesMap).filter(mem => mem.grooming && mem.grooming.pending).length;
+  }
+
+  function updateGroomingFilterLabel() {
+    const select = document.getElementById('grooming-filter');
+    const pendingCount = countPendingGrooming();
+    const pendingOption = select.querySelector('option[value="pending"]');
+    if (pendingOption) {
+      pendingOption.textContent = '待确认 episodic (' + pendingCount + ')';
+    }
+  }
+
+  function confirmGroomingKeep() {
+    if (!selectedId) return;
+    const btn = document.querySelector('#grooming-actions .btn-grooming-confirm');
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = '确认中...';
+    }
+    fetch('/api/grooming/confirm/' + encodeURIComponent(selectedId), { method: 'POST' })
+      .then(r => r.json())
+      .then(result => {
+        if (!result.ok) {
+          alert('确认失败: ' + (result.error || '未知错误'));
+          if (btn) {
+            btn.disabled = false;
+            btn.textContent = '确认保留';
+          }
+          return;
+        }
+        const mem = memoriesMap[selectedId];
+        if (mem) {
+          mem.grooming = result.grooming || mem.grooming || {};
+          mem.grooming.pending = false;
+          const bg = originalNodeColors[selectedId] || '#95a5a6';
+          nodes.update({
+            id: selectedId,
+            borderWidth: 1,
+            color: { background: bg, border: bg, highlight: { background: bg, border: '#f39c12' } },
+          });
+        }
+        updateGroomingFilterLabel();
+        onFilterChange();
+        renderGroomingPanel(mem);
+        const metaEl = document.getElementById('grooming-meta');
+        if (metaEl) {
+          metaEl.textContent = (metaEl.textContent ? metaEl.textContent + ' · ' : '') + '✓ 已确认保留';
+        }
+      })
+      .catch(err => {
+        console.error('confirm grooming failed', err);
+        alert('确认失败，请重试');
+        if (btn) {
+          btn.disabled = false;
+          btn.textContent = '确认保留';
+        }
+      });
+  }
+
+  function applyGroomingPromote() {
+    if (!selectedId) return;
+    if (!confirm('确认采纳升类建议？')) return;
+    fetch('/api/grooming/promote/' + encodeURIComponent(selectedId), { method: 'POST' })
+      .then(r => r.json())
+      .then(result => {
+        if (!result.ok) {
+          alert('升类失败: ' + (result.error || '未知错误'));
+          return;
+        }
+        location.reload();
+      })
+      .catch(err => {
+        console.error('promote failed', err);
+        alert('升类失败，请重试');
+      });
+  }
+
+  function applyGroomingDelete() {
+    if (!selectedId) return;
+    const mem = memoriesMap[selectedId];
+    const reason = (mem && mem.grooming && mem.grooming.reason)
+      ? ('采纳 AI 删除建议: ' + mem.grooming.reason)
+      : '采纳 AI 删除建议';
+    if (!confirm('确认删除此记忆？\\n' + reason)) return;
+    fetch('/delete/' + selectedId, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ reason: reason }),
+    })
+      .then(r => r.json())
+      .then(result => {
+        if (result.ok) {
+          deletedNodeIds.add(selectedId);
+          nodes.remove(selectedId);
+          delete memoriesMap[selectedId];
+          hideDetail();
+          updateStats();
+        } else {
+          alert('删除失败: ' + result.error);
+        }
+      });
+  }
+
+  function applyGroomingMerge() {
+    if (!selectedId) return;
+    const mem = memoriesMap[selectedId];
+    const targetId = mem && mem.merge_hint ? mem.merge_hint.target_id : '';
+    if (!confirm('合并前将重新校验目标，确认继续？')) return;
+    fetch('/api/grooming/merge/' + encodeURIComponent(selectedId), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ target_id: targetId }),
+    })
+      .then(r => r.json())
+      .then(result => {
+        if (!result.ok) {
+          alert('合并失败: ' + (result.error || '未知错误'));
+          return;
+        }
+        let msg = '已合并至 ' + result.target_id;
+        if (result.target_changed) msg += '（目标已变更）';
+        alert(msg);
+        location.reload();
+      })
+      .catch(err => {
+        console.error('merge failed', err);
+        alert('合并失败，请重试');
+      });
   }
 
   function actionLabel(action) {
@@ -1125,6 +1488,7 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
     return {
       project: document.getElementById('project-filter').value,
       category: document.getElementById('category-filter').value,
+      grooming: document.getElementById('grooming-filter').value,
     };
   }
 
@@ -1132,6 +1496,10 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
     if (!mem) return false;
     if (filters.project && mem.project !== filters.project) return false;
     if (filters.category && mem.category !== filters.category) return false;
+    if (filters.grooming === 'pending') {
+      const pending = mem.grooming && mem.grooming.pending;
+      if (!pending) return false;
+    }
     return true;
   }
 
@@ -1277,6 +1645,7 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
 
   document.getElementById('project-filter').addEventListener('change', onFilterChange);
   document.getElementById('category-filter').addEventListener('change', onFilterChange);
+  document.getElementById('grooming-filter').addEventListener('change', onFilterChange);
 
   document.getElementById('search-input').addEventListener('keydown', function(e) {
     if (e.key === 'Enter') doSearch();
@@ -1286,6 +1655,7 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
     document.getElementById('search-input').value = '';
     document.getElementById('project-filter').value = '';
     document.getElementById('category-filter').value = '';
+    document.getElementById('grooming-filter').value = '';
     document.getElementById('search-results').classList.remove('visible');
     lastSearchResults = [];
     lastSearchPayload = null;
@@ -1418,13 +1788,26 @@ def index():
     memories = load_all_memories()
     edges = compute_edges(memories)
     thickness = compute_thickness(memories, edges)
+    merge_hints_payload = read_merge_hints()
+    pending_grooming_count = sum(
+        1 for memory in memories
+        if (memory.get('grooming') or {}).get('pending')
+    )
 
     nodes_json = json.dumps([
         {
             'id': m['id'],
             'label': m['text'][:30] + ('...' if len(m['text']) > 30 else ''),
             'title': (f"[{m['project']}] " if m['project'] else '[全局] ') + m['text'][:60] + ('...' if len(m['text']) > 60 else ''),
-            'color': CATEGORY_COLORS.get(m['category'], _GLOBAL_COLOR),
+            'color': {
+                'background': CATEGORY_COLORS.get(m['category'], _GLOBAL_COLOR),
+                'border': '#f39c12' if (m.get('grooming') or {}).get('pending') else CATEGORY_COLORS.get(m['category'], _GLOBAL_COLOR),
+                'highlight': {
+                    'background': CATEGORY_COLORS.get(m['category'], _GLOBAL_COLOR),
+                    'border': '#f39c12',
+                },
+            },
+            'borderWidth': 3 if (m.get('grooming') or {}).get('pending') else 1,
             'shape': thickness[m['id']]['shape'],
             'size': thickness[m['id']]['size'],
             'shadow': thickness[m['id']]['shadow'] if thickness[m['id']]['shadow'] else None,
@@ -1442,6 +1825,7 @@ def index():
     projects = sorted(set(m['project'] for m in memories if m['project']))
     category_items = [(cat, CATEGORY_LABELS[cat]) for cat in sorted(VALID_CATEGORIES)]
     category_colors_json = json.dumps(CATEGORY_COLORS, ensure_ascii=False)
+    merge_hints_json = json.dumps(merge_hints_payload, ensure_ascii=False)
 
     return render_template_string(
         HTML_TEMPLATE,
@@ -1449,6 +1833,8 @@ def index():
         edges_json=edges_json,
         memories_map_json=memories_map_json,
         thickness_json=thickness_json,
+        merge_hints_json=merge_hints_json,
+        pending_grooming_count=pending_grooming_count,
         projects=projects,
         category_items=category_items,
         category_colors=CATEGORY_COLORS,
@@ -1544,6 +1930,7 @@ def update_memory_metadata(
             'category_raw': str(new_meta.get('category_raw', '') or ''),
         }
 
+    clear_grooming_suggestion(new_meta)
     col.update(ids=[memory_id], metadatas=[_sanitize_chroma_metadata(new_meta)])
 
     from memory_sync import sync_active_update_meta
@@ -1669,6 +2056,45 @@ def update_memory(memory_id: str):
         return jsonify({'ok': True, **result})
     except ValueError as exc:
         return jsonify({'ok': False, 'error': str(exc)}), 404
+    except Exception as exc:
+        return jsonify({'ok': False, 'error': str(exc)}), 500
+
+
+@app.route('/api/grooming/confirm/<memory_id>', methods=['POST'])
+def grooming_confirm(memory_id: str):
+    """确认保留：仅清 grooming_pending。"""
+    try:
+        result = confirm_grooming_memory(memory_id)
+        return jsonify({'ok': True, **result})
+    except ValueError as exc:
+        return jsonify({'ok': False, 'error': str(exc)}), 404
+    except Exception as exc:
+        return jsonify({'ok': False, 'error': str(exc)}), 500
+
+
+@app.route('/api/grooming/promote/<memory_id>', methods=['POST'])
+def grooming_promote(memory_id: str):
+    """采纳升类建议。"""
+    try:
+        result = execute_grooming_promote(memory_id)
+        confirm_grooming_memory(memory_id)
+        return jsonify({'ok': True, **result})
+    except ValueError as exc:
+        return jsonify({'ok': False, 'error': str(exc)}), 400
+    except Exception as exc:
+        return jsonify({'ok': False, 'error': str(exc)}), 500
+
+
+@app.route('/api/grooming/merge/<source_id>', methods=['POST'])
+def grooming_merge(source_id: str):
+    """合并（重校验）。"""
+    body = request.get_json(silent=True) or {}
+    hinted_target = str(body.get('target_id', '') or '')
+    try:
+        result = execute_grooming_merge(source_id, hinted_target)
+        return jsonify({'ok': True, **result})
+    except ValueError as exc:
+        return jsonify({'ok': False, 'error': str(exc)}), 400
     except Exception as exc:
         return jsonify({'ok': False, 'error': str(exc)}), 500
 
