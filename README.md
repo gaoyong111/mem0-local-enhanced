@@ -41,11 +41,12 @@
 
 ### 运行时
 
-- **MCP 五工具**：add / search / get_all / delete / **retry_pending**
+- **MCP 六工具**：add / search / get_all / delete / **retry_pending** / **confirm_grooming**
 - **pending 兜底**：写入失败 → `~/.mem0/pending/`，复盘或 retry_pending 重试
 - **LLM 兜底**：主配置失败自动切 `config_ollama.json`
 - **Hook 注入**：Claude `UserPromptSubmit` + Cursor `beforeSubmitPrompt`
-- **mem_viewer**：Flask + vis.js 图谱；category 筛选/上色、混合检索结果面板（score+source）、演变时间线；**手动新增/编辑**记忆（正文扩写重嵌向量、project/category）、相似记忆预警
+- **mem_viewer**：Flask + vis.js 图谱；category 筛选/上色、混合检索结果面板（score+source）、演变时间线；**手动新增/编辑**记忆；**episodic 待确认**筛选（橙框）、AI 梳理建议面板（确认保留/采纳删升/合并重校验）
+- **episodic 人机梳理**：新 episodic 自动 `grooming_pending=1`；AI 只写 keep/delete/promote 建议（merge 进当次 `grooming-merge-hints.json`）；用户在 viewer 或对话确认，不自动执行
 - **memory_lineage**：`lineage.jsonl` 记录 MERGE/DEDUP/DELETE，grooming 合并须带 `merged_from`
 
 ### 每日复盘闭环（Claude Code cron）
@@ -104,6 +105,9 @@ python3 ~/.mem0/mem_viewer.py   # http://localhost:8765
 # 复盘辅助
 python3 scripts/review_helpers.py check-missed-run
 python3 scripts/review_helpers.py snapshot
+
+# episodic 梳理（写 AI 建议 + merge hints；mem_viewer 关闭时 LLM 更稳）
+MEM0_DIR=~/.mem0 python3 scripts/episodic_grooming_run.py --dry-run
 ```
 
 ## IDE 集成
@@ -142,7 +146,9 @@ cp configs/config_ollama.example.json ~/.mem0/config_ollama.json
 
 ## 可视化 Web UI
 
-`mem_viewer.py` — 图谱浏览记忆：category 筛选/上色、混合检索结果面板（score+source，与 MCP 同算法）、演变时间线、厚度指标、删除；**新增/编辑**记忆（`/api/add`、`/api/update`，扩写时重嵌向量；写入前 `/api/similar` 相似预警）。
+`mem_viewer.py` — 图谱浏览记忆：category 筛选/上色、混合检索结果面板（score+source，与 MCP 同算法）、演变时间线、厚度指标、删除；**新增/编辑**记忆（`/api/add`、`/api/update`，扩写时重嵌向量；写入前 `/api/similar` 相似预警）；**episodic 待确认**（筛选/橙框/AI 建议面板，确认保留仅清 `grooming_pending`）。
+
+episodic 梳理批处理 → `scripts/episodic_grooming_run.py`；协议详见 [docs/architecture.md](docs/architecture.md)「episodic 人机梳理」一节。
 
 设计规格 → [docs/superpowers/specs/2026-06-01-mem-viewer-design.md](docs/superpowers/specs/2026-06-01-mem-viewer-design.md)
 
@@ -157,9 +163,12 @@ mem0-local-enhanced/          # 本仓库（源码 + 文档）
 │   ├── mem0_hook.py
 │   ├── mem_viewer.py
 │   ├── memory_lineage.py
+│   ├── grooming_metadata.py    # episodic 梳理 metadata 协议
+│   ├── grooming_episodic.py    # AI 建议 + merge hints 逻辑
 │   └── ...
 ├── scripts/
-│   └── review_helpers.py     # 复盘：快照/diff/漏跑/续期日志
+│   ├── review_helpers.py       # 复盘：快照/diff/漏跑/续期日志
+│   └── episodic_grooming_run.py  # episodic 梳理批处理
 ├── configs/                  # 配置模板
 └── docs/
     ├── architecture.md
@@ -169,6 +178,7 @@ mem0-local-enhanced/          # 本仓库（源码 + 文档）
 
 ~/.mem0/                      # 运行时（安装目标）
 ├── pending/                  # 写入失败队列
+├── grooming-merge-hints.json # 当次 merge 建议（grooming 覆盖写）
 ├── chroma_db/
 └── history.db
 
@@ -193,6 +203,7 @@ mem0-local-enhanced/          # 本仓库（源码 + 文档）
 - 跨词同义（如淋雨↔下雨）依赖向量路，keyword 不维护同义词表
 - AnthropicLLM provider 不传递 `response_format`（infer/merge 受影响）
 - Chroma metadata 仅支持标量，嵌套 dict 需 `structured_json` 序列化
+- Chroma `update` 合并 metadata，删除字段须写 `0`/空串（如 `grooming_pending=0`），不能 pop 键
 
 ## License
 

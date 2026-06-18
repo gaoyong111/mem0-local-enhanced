@@ -134,7 +134,31 @@ Claude Code cron 有生命周期限制。每日复盘 cron（`3 18 * * *`）在 
 | 用户偏好 | preference | 「一步操作不走 skill」 |
 | 踩坑/事件 | episodic | 「某次 bug 根因与修复」；不确定分类时用此项 |
 
-每条须含 **Why** + **How to apply**。写入前 `search_memory` 查重；统一 `infer=false`；category 漏填默认 episodic。
+每条须含 **Why** + **How to apply**。写入前 `search_memory` 查重；统一 `infer=false`；category 漏填默认 episodic（自动 `grooming_pending=1`）。
+
+## memory-grooming（episodic 人机梳理）
+
+复盘 **memory-grooming** 阶段（mem0 可用时）：**不自动删/合/升 episodic**，只写 AI 建议，用户在 mem_viewer 确认。
+
+```bash
+# 默认：待确认或无 grooming_at 的 episodic
+MEM0_DIR=~/.mem0 python3 ~/Desktop/mem0-local-enhanced/scripts/episodic_grooming_run.py
+
+# 预览
+MEM0_DIR=~/.mem0 python3 ~/Desktop/mem0-local-enhanced/scripts/episodic_grooming_run.py --dry-run
+```
+
+| 输出 | 存储 |
+|------|------|
+| keep / delete / promote 建议 + 理由 | Chroma metadata（`grooming_action`、`grooming_reason` 等） |
+| merge 建议 | `~/.mem0/grooming-merge-hints.json`（**当次覆盖**，有时效性） |
+| 待确认标记 | `grooming_pending=1`；用户「确认保留」→ `0` |
+
+用户在 **mem_viewer**（待确认筛选 / AI 建议面板）或对话中让 AI 执行建议后，调用 MCP `confirm_grooming` 清标记。
+
+> mem_viewer 运行时 Chroma 被占用，批处理 LLM 可能失败并走规则兜底；需要 LLM 分析时先关闭 viewer 再跑脚本。
+
+→ 协议详见 [architecture.md](architecture.md)「episodic 人机梳理」
 
 ## 相关文件一览
 
@@ -151,4 +175,3 @@ Claude Code cron 有生命周期限制。每日复盘 cron（`3 18 * * *`）在 
 ## 已知待办（mem0 质量）
 
 - hybrid_search rerank 层（#43，库变大后再评估）
-- episodic 清理标准规范（#38）

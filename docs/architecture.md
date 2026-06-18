@@ -183,6 +183,7 @@ mem_viewer 搜索面板与 MCP 使用同一 `hybrid_search`（max=8），展示 
 | `get_all_memories` | 获取所有记忆，支持 project 限定范围 |
 | `delete_memory` | 删除指定 ID（**reason 必填**），多表事务同步 |
 | `retry_pending` | 重试 `pending/` 写入失败 + `sync_pending/` 同步失败 |
+| `confirm_grooming` | 确认 episodic 梳理建议（写 `grooming_pending=0`，不改正文） |
 
 ## 三层记忆注入
 

@@ -41,11 +41,12 @@ Daily review (cron 18:03 + skill) → evolve memories → snapshot baseline
 
 ### Runtime
 
-- **MCP tools**: add / search / get_all / delete / **retry_pending**
+- **MCP tools**: add / search / get_all / delete / **retry_pending** / **confirm_grooming**
 - **Pending fallback** at `~/.mem0/pending/` (shared by MCP and daily review)
 - **LLM fallback**: auto-switch to `config_ollama.json` when primary config fails
 - **Hooks**: Claude `UserPromptSubmit` + Cursor `beforeSubmitPrompt`
-- **mem_viewer**: Flask + vis.js graph; category filter/color, hybrid search panel (score+source), lineage timeline; **manual add/edit** (content re-embed, project/category), similar-memory warning before add
+- **mem_viewer**: Flask + vis.js graph; category filter/color, hybrid search panel (score+source), lineage timeline; **manual add/edit**; **episodic pending** filter (orange border), AI grooming panel (confirm keep / adopt delete-promote / merge with re-validation)
+- **Episodic human-in-the-loop grooming**: new episodic gets `grooming_pending=1`; AI writes keep/delete/promote only (merge in session `grooming-merge-hints.json`); user confirms in viewer or chat — no auto delete/merge/promote
 - **memory_lineage**: `lineage.jsonl` for MERGE/DEDUP/DELETE; grooming merges must include `merged_from`
 
 ### Daily review loop (Claude Code cron)
@@ -104,6 +105,9 @@ python3 ~/.mem0/mem_viewer.py   # http://localhost:8765
 # Review helper
 python3 scripts/review_helpers.py check-missed-run
 python3 scripts/review_helpers.py snapshot
+
+# Episodic grooming (writes AI suggestions + merge hints; close mem_viewer for reliable LLM)
+MEM0_DIR=~/.mem0 python3 scripts/episodic_grooming_run.py --dry-run
 ```
 
 ## IDE Integration
@@ -142,7 +146,9 @@ cp configs/config_ollama.example.json ~/.mem0/config_ollama.json
 
 ## Web UI
 
-`mem_viewer.py` — graph browse: category filter/color, hybrid search panel (same algorithm as MCP), lineage timeline, thickness metric, delete; **add/edit** memories (`/api/add`, `/api/update`, re-embed on content change; `/api/similar` warning before add).
+`mem_viewer.py` — graph browse: category filter/color, hybrid search panel (same algorithm as MCP), lineage timeline, thickness metric, delete; **add/edit** memories (`/api/add`, `/api/update`, re-embed on content change; `/api/similar` warning before add); **episodic pending** (filter/orange border/AI grooming panel; confirm keep clears `grooming_pending` only).
+
+Batch script → `scripts/episodic_grooming_run.py`; protocol in [docs/architecture.md](docs/architecture.md) (episodic grooming section).
 
 Design spec → [docs/superpowers/specs/2026-06-01-mem-viewer-design.md](docs/superpowers/specs/2026-06-01-mem-viewer-design.md)
 
@@ -157,9 +163,12 @@ mem0-local-enhanced/          # This repo (source + docs)
 │   ├── mem0_hook.py
 │   ├── mem_viewer.py
 │   ├── memory_lineage.py
+│   ├── grooming_metadata.py    # episodic grooming metadata protocol
+│   ├── grooming_episodic.py    # AI suggestions + merge hints logic
 │   └── ...
 ├── scripts/
-│   └── review_helpers.py     # Review: snapshot/diff/missed-run/resume log
+│   ├── review_helpers.py       # Review: snapshot/diff/missed-run/resume log
+│   └── episodic_grooming_run.py  # episodic grooming batch job
 ├── configs/                  # Config templates
 └── docs/
     ├── architecture.md
@@ -169,6 +178,7 @@ mem0-local-enhanced/          # This repo (source + docs)
 
 ~/.mem0/                      # Runtime (install target)
 ├── pending/                  # Failed-write queue
+├── grooming-merge-hints.json # Session merge hints (overwritten each grooming run)
 ├── chroma_db/
 └── history.db
 
@@ -193,6 +203,7 @@ mem0-local-enhanced/          # This repo (source + docs)
 - Cross-word synonyms (e.g. 淋雨↔下雨) rely on the vector path; no manual synonym table
 - AnthropicLLM provider does not pass `response_format` (affects infer/merge if re-enabled)
 - Chroma metadata is scalar-only; nested dicts need `structured_json` serialization
+- Chroma `update` merges metadata; clearing fields requires `0`/empty string (e.g. `grooming_pending=0`), not key deletion
 
 ## License
 
