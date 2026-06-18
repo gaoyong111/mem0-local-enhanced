@@ -551,7 +551,9 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
   #graph-container { flex:1; }
   #detail-panel { width:320px; background:#16213e; border-left:1px solid #0f3460; overflow:hidden; display:none; flex-direction:column; }
   #detail-panel.visible { display:flex; }
-  #detail-panel-body { flex:1; overflow-y:auto; padding:16px; min-height:0; }
+  #detail-panel-body { flex:1; overflow-y:auto; padding:16px; min-height:0; scrollbar-width:thin; scrollbar-color:#0f3460 transparent; }
+  #detail-panel-body::-webkit-scrollbar { width:6px; }
+  #detail-panel-body::-webkit-scrollbar-thumb { background:#0f3460; border-radius:3px; }
   #detail-panel-footer { flex-shrink:0; padding:12px 16px 16px; border-top:1px solid #0f3460; background:#16213e; }
 
   .detail-title { font-size:16px; font-weight:600; margin-bottom:12px; color:#3498db; }
@@ -560,9 +562,8 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
   .detail-text { font-size:14px; line-height:1.6; white-space:pre-wrap; }
   .detail-meta { font-size:12px; color:#95a5a6; }
   .timeline-hint { font-size:11px; color:#7f8c8d; margin-bottom:4px; }
-  .timeline-scroll { max-height:140px; overflow-y:auto; margin-top:4px; padding-right:4px; }
-  .timeline-list { list-style:none; padding:0; margin:0; }
-  .merge-sources { margin-top:4px; max-height:200px; overflow-y:auto; padding-right:4px; }
+  .timeline-list { list-style:none; padding:0; margin:4px 0 0; }
+  .merge-sources { margin-top:4px; }
   .merge-sources-empty { font-size:12px; color:#95a5a6; }
   .merge-sources-title { font-size:12px; color:#7f8c8d; margin-bottom:8px; }
   .merge-source-node { margin-bottom:10px; border:1px solid #0f3460; border-radius:6px; background:#1a1a2e; overflow:hidden; }
@@ -724,9 +725,7 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
       <div class="detail-label">演变时间线</div>
       <div class="detail-meta timeline-hint">合并来源：展示并入本条的原记忆正文；若来源本身由合并产生会继续展开</div>
       <div id="detail-ancestors" class="merge-sources"></div>
-      <div class="timeline-scroll">
-        <ul class="timeline-list" id="detail-timeline"></ul>
-      </div>
+      <ul class="timeline-list" id="detail-timeline"></ul>
     </div>
     <div class="detail-section">
       <div class="detail-label">Metadata</div>
@@ -813,7 +812,6 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
       ADD: '创建',
       UPDATE: '内容修正',
       DELETE: '删除',
-      MERGE: '合并',
       DEDUP_DROP: '去重删除',
       CATEGORY_CHANGE: '分类变更',
       GROOMING: '梳理',

@@ -118,7 +118,7 @@ def _history_events(memory_id: str) -> list[dict[str, Any]]:
             'target_id': '',
             'category': '',
             'note': 'history.db',
-            'content_preview': (new_memory or old_memory or '')[:200],
+            'content_preview': new_memory or old_memory or '',
             'actor': 'mem0',
             'origin': 'history',
         })
@@ -313,7 +313,7 @@ def build_timeline(memory_id: str, *, include_ancestors: bool = True) -> dict[st
                 'target_id': '',
                 'category': archived.get('category', ''),
                 'note': archived.get('reason', ''),
-                'content_preview': (archived.get('content', '') or '')[:200],
+                'content_preview': archived.get('content', '') or '',
                 'actor': archived.get('actor', ''),
                 'origin': 'deleted_archive',
             })
@@ -331,20 +331,25 @@ def build_timeline(memory_id: str, *, include_ancestors: bool = True) -> dict[st
 
     deduped.sort(key=lambda row: row.get('ts', ''), reverse=True)
 
+    # MERGE 事件由 merge_sources 卡片展示，时间线不再重复
+    deduped = [item for item in deduped if item.get('action') != 'MERGE']
+
+    for item in deduped:
+        preview = str(item.get('content_preview', '') or '')
+        mid = str(item.get('memory_id', '') or '')
+        if not mid or (preview and len(preview) < 200):
+            continue
+        snap = resolve_memory_snapshot(mid)
+        full = str(snap.get('content', '') or '')
+        if full:
+            item['content_preview'] = full
+
     ancestors = collect_ancestor_ids(memory_id) if include_ancestors else []
-    ancestor_timelines: dict[str, list[dict[str, Any]]] = {}
-    if include_ancestors:
-        for ancestor_id in ancestors[:20]:
-            ancestor_timelines[ancestor_id] = build_timeline(
-                ancestor_id,
-                include_ancestors=False,
-            )['events']
 
     return {
         'memory_id': memory_id,
         'events': deduped,
         'ancestor_ids': ancestors,
-        'ancestor_timelines': ancestor_timelines,
         'merge_sources': build_merge_source_tree(memory_id),
     }
 

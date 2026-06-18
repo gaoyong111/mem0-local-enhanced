@@ -37,6 +37,10 @@ mem0-local-enhanced 负责**记忆的存、搜、注入**；每日复盘负责**
 - 用户频繁提出的问题（可固化为经验）
 - 用户随口偏好或吐槽（preference 类记忆来源）
 
+**筛选方式**：
+- Claude Code 会话：按 JSONL 内部 `timestamp` 字段过滤（精确）
+- Cursor 会话：Cursor JSONL 只有 `role` + `message` 无 `timestamp`，改用文件 `mtime` 筛选（mtime ≥ 时间起点即视为相关）。排除 `/subagents/` 子目录
+
 ## 权威流程
 
 复盘流程的**唯一真相源**：

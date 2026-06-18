@@ -13,6 +13,7 @@ from typing import Any
 
 MEM0_DIR = os.path.expanduser('~/.mem0')
 REVIEW_DIR = os.path.expanduser('~/daily-reviews')
+DATA_DIR = os.path.join(REVIEW_DIR, '.data')
 HISTORY_DB = os.path.join(MEM0_DIR, 'history.db')
 CHROMA_DB_PATH = os.path.join(MEM0_DIR, 'chroma_db')
 CRON_RENEWAL_LOG = os.path.join(REVIEW_DIR, 'cron-renewal.log')
@@ -100,16 +101,16 @@ def build_snapshot() -> dict[str, Any]:
 
 def snapshot_path(date_str: str | None = None) -> str:
     date_str = date_str or datetime.now().strftime('%Y%m%d')
-    return os.path.join(REVIEW_DIR, f'mem0-snapshot-{date_str}.json')
+    return os.path.join(DATA_DIR, f'mem0-snapshot-{date_str}.json')
 
 
 def find_latest_snapshot() -> str | None:
-    paths = sorted(glob.glob(os.path.join(REVIEW_DIR, 'mem0-snapshot-*.json')))
+    paths = sorted(glob.glob(os.path.join(DATA_DIR, 'mem0-snapshot-*.json')))
     return paths[-1] if paths else None
 
 
 def cmd_snapshot(args: argparse.Namespace) -> int:
-    os.makedirs(REVIEW_DIR, exist_ok=True)
+    os.makedirs(DATA_DIR, exist_ok=True)
     path = snapshot_path(args.date)
     data = build_snapshot()
     with open(path, 'w', encoding='utf-8') as f:
@@ -196,7 +197,7 @@ def cmd_check_missed_run(args: argparse.Namespace) -> int:
 
 
 def cmd_log_cron_renewal(args: argparse.Namespace) -> int:
-    os.makedirs(REVIEW_DIR, exist_ok=True)
+    os.makedirs(DATA_DIR, exist_ok=True)
     line = (
         f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | "
         f"old={args.old} new={args.new} | note={args.note or ''}\n"
