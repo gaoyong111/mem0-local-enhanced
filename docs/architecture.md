@@ -1,6 +1,6 @@
 # 架构详解：写入策略 B/C/D/E + 混合检索
 
-[English version not yet available — refer to README_EN.md for overview]
+[English overview → README_EN.md](../README_EN.md) · [Web UI spec → mem-viewer-design.md](mem-viewer-design.md)
 
 ## 写入策略
 
@@ -120,7 +120,7 @@ Chroma metadata 仅支持标量值，嵌套的 `structured` dict 会被序列化
         ├─ rrf = 1/(K+vec_rank) + 0.5·1/(K+kw_rank)；K=15，β=0
         ├─ project 匹配 +0.005；preference 跨类 +0.008
         ├─ 配额：project 前 3 直保 + 全局保底 2
-        └─ 默认 top-5（MCP）/ top-8（viewer）
+        └─ 返回条数：Hook L2 max=5 · MCP search max=8 · viewer 搜索面板 max=8 · viewer /api/similar max=5
 ```
 
 跨词同义（如淋雨↔下雨）交给向量路，不维护手动同义词表。设计文档见 `daily-reviews/hybrid-search-design.md`。
@@ -145,7 +145,7 @@ Chroma metadata 仅支持标量值，嵌套的 `structured` dict 会被序列化
 
 **注意**：MCP 输出 `kw=` / `vec=` / `kw_rank` / `vec_rank` / `rrf=` / 可选 `proj=`，不可把 keyword 分当作 0～1 语义相关度。
 
-mem_viewer 搜索面板与 MCP 使用同一 `hybrid_search`（max=8），展示 rank / score / source 便于对比。
+mem_viewer 搜索面板与 MCP `search_memory` 使用同一 `hybrid_search`（max=8）。Hook 自动注入为 max=5，写入前相似预警 `/api/similar` 亦为 max=5。展示 rank / score / source 便于对比。
 
 ### 项目检测
 
@@ -232,7 +232,11 @@ episodic 不自动删/合/升，AI 只写建议，用户在 mem_viewer 或对话
 
 **merge 采纳**：viewer「合并（重校验）」当场 hybrid_search 重验目标，再删 source + target 写 `merged_from`。
 
-批处理脚本：`mem0-local-enhanced/scripts/episodic_grooming_run.py`（复盘 grooming 阶段调用）。MCP 工具 `confirm_grooming` 供 AI 清标记。
+批处理脚本：`scripts/episodic_grooming_run.py`（复盘 grooming 阶段调用）。MCP 工具 `confirm_grooming` 供 AI 清标记。
+
+### 历史 infer 英文遗留（一次性迁移）
+
+早期 `infer=true` 写入的纯英文/碎片记忆可用 `scripts/english_grooming_run.py` 做**一次性**改写或删除（脚本内含硬编码 memory ID，仅供个人库迁移参考；新库无需运行）。需 Ollama 可用以 re-embed。日常 episodic 质量维护请用 `episodic_grooming_run.py` + mem_viewer 待确认流程。
 
 MCP server 启动时：
 
@@ -309,5 +313,6 @@ mem0 的 `AnthropicLLM` provider 不会将 `response_format` 参数传递给底�
 ## 相关文档
 
 - [每日复盘集成](daily-review-integration.md) — cron、pending、快照 diff、进化提取
+- [mem_viewer 设计规格](mem-viewer-design.md) — Web UI API、检索条数、grooming 面板
 - [Claude Code 集成](claude-code-setup.md)
 - [Cursor 集成](cursor-setup.md)

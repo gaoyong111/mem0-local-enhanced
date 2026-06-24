@@ -11,10 +11,9 @@ from typing import Any
 
 from mem0_add_policy import normalize_category  # noqa: E402
 
-CONFIG_PATH = os.path.expanduser('~/.mem0/config_local.json')
+from mem0_paths import CHROMA_DB_PATH, CONFIG_PATH, HISTORY_DB, PROJECT_ALIASES_PATH  # noqa: E402
+
 DEFAULT_USER = os.getenv('MEM0_DEFAULT_USER_ID', os.getenv('MEM0_USER_ID', 'default-user'))
-HISTORY_DB = os.path.expanduser('~/.mem0/history.db')
-CHROMA_DB_PATH = os.path.expanduser('~/.mem0/chroma_db')
 
 DEFAULT_TOP_K = 15
 DEFAULT_MAX_RESULTS = 5
@@ -53,11 +52,6 @@ VECTOR_SCORE_REL_MARGIN = float(os.getenv('MEM0_VECTOR_REL_MARGIN', '0.10'))
 GENERIC_DIR_NAMES = frozenset({
     'Desktop', 'Documents', 'Home', 'home', 'Downloads', 'src', 'code', 'projects', 'tmp',
 })
-
-PROJECT_ALIASES_PATH = os.path.join(
-    os.getenv('MEM0_DIR', os.path.expanduser('~/.mem0')),
-    'project_aliases.json',
-)
 
 
 def _load_project_aliases() -> dict[str, str]:

@@ -37,7 +37,7 @@ _PRIMARY_CONFIG = os.getenv('MEM0_CONFIG', os.path.expanduser('~/.mem0/config_lo
 _FALLBACK_CONFIG = os.getenv('MEM0_FALLBACK_CONFIG', os.path.expanduser('~/.mem0/config_ollama.json'))
 DEFAULT_USER = os.getenv('MEM0_USER_ID', 'default-user')
 DEFAULT_MAX_RESULTS = 8
-PENDING_DIR = os.path.expanduser('~/.mem0/pending')
+from mem0_paths import PENDING_DIR
 MAX_RETRY_COUNT = 3
 
 mcp = FastMCP('mem0-local')

@@ -9,8 +9,7 @@ from typing import Any
 
 from mem0_add_policy import DEFAULT_CATEGORY, VALID_CATEGORIES, normalize_category
 
-MEM0_DIR = os.getenv('MEM0_DIR', os.path.expanduser('~/.mem0'))
-MERGE_HINTS_PATH = os.path.join(MEM0_DIR, 'grooming-merge-hints.json')
+from mem0_paths import MERGE_HINTS_PATH
 
 GROOMING_ACTIONS = frozenset({'keep', 'delete', 'promote'})
 GROOMING_ACTION_LABELS: dict[str, str] = {

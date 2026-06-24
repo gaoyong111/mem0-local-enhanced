@@ -8,8 +8,7 @@ import sqlite3
 import time
 from typing import Any
 
-LINEAGE_PATH = os.path.expanduser('~/.mem0/lineage.jsonl')
-HISTORY_DB = os.path.expanduser('~/.mem0/history.db')
+from mem0_paths import HISTORY_DB, LINEAGE_PATH
 
 VALID_ACTIONS = frozenset({
     'ADD',

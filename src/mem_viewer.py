@@ -16,6 +16,8 @@ _MEM0_DIR = os.getenv('MEM0_DIR', os.path.expanduser('~/.mem0'))
 if _MEM0_DIR not in sys.path:
     sys.path.insert(0, _MEM0_DIR)
 
+from mem0_paths import ACTIVE_DB  # noqa: E402
+
 from hybrid_search import (  # noqa: E402
     CHROMA_DB_PATH,
     HISTORY_DB,
@@ -95,7 +97,7 @@ def load_all_memories() -> list[dict]:
     merge_hints_payload = read_merge_hints()
 
     created_at_map: dict[str, str] = {}
-    conn = sqlite3.connect(os.path.expanduser('~/.mem0/active_memories.db'))
+    conn = sqlite3.connect(ACTIVE_DB)
     try:
         for memory_id, created_at, updated_at in conn.execute(
             'SELECT memory_id, created_at, updated_at FROM active_memories'

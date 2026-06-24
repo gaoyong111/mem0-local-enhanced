@@ -42,10 +42,10 @@ Daily review (cron 18:03 + skill) → evolve memories → snapshot baseline
 ### Runtime
 
 - **MCP tools**: add / search / get_all / delete / **retry_pending** / **confirm_grooming**
-- **Pending fallback** at `~/.mem0/pending/` (shared by MCP and daily review)
+- **Pending fallback**: `~/.mem0/pending/` for failed adds; `~/.mem0/sync_pending/` for multi-table sync failures (both retried by `retry_pending`)
 - **LLM fallback**: auto-switch to `config_ollama.json` when primary config fails
-- **Hooks**: Claude `UserPromptSubmit` + Cursor `beforeSubmitPrompt`
-- **mem_viewer**: Flask + vis.js graph; category filter/color, hybrid search panel (score+source), lineage timeline; **manual add/edit**; **episodic pending** filter (orange border), AI grooming panel (confirm keep / adopt delete-promote / merge with re-validation)
+- **Hooks**: Claude `UserPromptSubmit` + Cursor `beforeSubmitPrompt` (max=5 per injection)
+- **mem_viewer**: Flask + vis.js graph; category filter/color, hybrid search panel (score+source, max=8), lineage timeline; **manual add/edit**; **episodic pending** filter (orange border), AI grooming panel (confirm keep / adopt delete-promote / merge with re-validation)
 - **Episodic human-in-the-loop grooming**: new episodic gets `grooming_pending=1`; AI writes keep/delete/promote only (merge in session `grooming-merge-hints.json`); user confirms in viewer or chat — no auto delete/merge/promote
 - **memory_lineage**: `lineage.jsonl` for MERGE/DEDUP/DELETE; grooming merges must include `merged_from`
 
@@ -66,23 +66,34 @@ Preflight checks Ollama + MCP; **degraded mode** when unavailable (docs still ge
 
 - Python 3.10+
 - [Ollama](https://ollama.ai) running + `bge-m3` (`ollama pull bge-m3`)
-- `pip install mem0ai chromadb mcp`
+- `pip install -r requirements.txt` (or `pip install mem0ai chromadb mcp flask`)
 
 > **Ollama is required.** MCP fails to start if Ollama is down; add/search are unavailable.
 
 ### Install
 
+**Option A: setup script (recommended)**
+
+```bash
+git clone https://github.com/gaoyong111/mem0-local-enhanced.git
+cd mem0-local-enhanced
+bash scripts/setup.sh
+```
+
+**Option B: manual**
+
 ```bash
 git clone https://github.com/gaoyong111/mem0-local-enhanced.git
 cd mem0-local-enhanced
 
-# Deploy to ~/.mem0/
+mkdir -p ~/.mem0
 cp src/*.py ~/.mem0/
+cp src/mem_viewer.sh ~/.mem0/
 cp src/project_aliases.example.json ~/.mem0/project_aliases.json
 cp configs/config_ollama.example.json ~/.mem0/config_local.json
-# Or API config: cp configs/config_api.example.json ~/.mem0/config_local.json
+# Or API: cp configs/config_api.example.json ~/.mem0/config_local.json
+cp .env.example ~/.mem0/.env   # optional
 
-# Review helper (optional; skill dir is outside this repo)
 mkdir -p ~/.claude/skills/daily-review/scripts
 cp scripts/review_helpers.py ~/.claude/skills/daily-review/scripts/
 ```
@@ -90,23 +101,12 @@ cp scripts/review_helpers.py ~/.claude/skills/daily-review/scripts/
 ### Verify
 
 ```bash
-# Ollama
 curl http://localhost:11434/api/tags
-
-# Hybrid search
 python3 ~/.mem0/search_context.py "test query"
-
-# MCP (stdio, Ctrl+C to exit)
 python3 ~/.mem0/mcp_server_local.py
-
-# Web UI
-python3 ~/.mem0/mem_viewer.py   # http://localhost:8765
-
-# Review helper
+python3 ~/.mem0/mem_viewer.py   # or bash ~/.mem0/mem_viewer.sh → http://localhost:8765
 python3 scripts/review_helpers.py check-missed-run
 python3 scripts/review_helpers.py snapshot
-
-# Episodic grooming (writes AI suggestions + merge hints; close mem_viewer for reliable LLM)
 MEM0_DIR=~/.mem0 python3 scripts/episodic_grooming_run.py --dry-run
 ```
 
@@ -119,24 +119,26 @@ MEM0_DIR=~/.mem0 python3 scripts/episodic_grooming_run.py --dry-run
 
 Notes:
 - Register MCP `mem0-local` → `~/.mem0/mcp_server_local.py`
-- Hooks need **absolute python path** (pyenv)
+- Hooks need **absolute python path** (pyenv); `hook_search.py` is the Claude compatibility entry
 - All writes use **`infer=false`** (default; explicit `true` is ignored)
 
 ## Configuration
 
 ### Primary / fallback
 
-```bash
-# Primary: remote LLM (recommended)
-cp configs/config_api.example.json ~/.mem0/config_local.json
+Runtime loads **JSON** configs. `configs/config.example.yaml` is a YAML reference with the same content — **not loadable directly**.
 
-# Fallback: Ollama-only (auto-switch when API fails)
+```bash
+cp configs/config_api.example.json ~/.mem0/config_local.json
 cp configs/config_ollama.example.json ~/.mem0/config_ollama.json
 ```
 
-### Pending queue
+### Pending queues
 
-**Single path** `~/.mem0/pending/` — shared by MCP failures, daily review fallback, and retry_pending.
+| Path | Purpose |
+|------|---------|
+| `~/.mem0/pending/` | Failed add writes |
+| `~/.mem0/sync_pending/` | Multi-table sync failures |
 
 ### infer
 
@@ -146,44 +148,22 @@ cp configs/config_ollama.example.json ~/.mem0/config_ollama.json
 
 ## Web UI
 
-`mem_viewer.py` — graph browse: category filter/color, hybrid search panel (same algorithm as MCP), lineage timeline, thickness metric, delete; **add/edit** memories (`/api/add`, `/api/update`, re-embed on content change; `/api/similar` warning before add); **episodic pending** (filter/orange border/AI grooming panel; confirm keep clears `grooming_pending` only).
+`mem_viewer.py` — graph browse: category filter/color, hybrid search panel (same algorithm as MCP, max=8), lineage timeline, thickness metric, delete; **add/edit** memories; **episodic pending** grooming panel.
 
-Batch script → `scripts/episodic_grooming_run.py`; protocol in [docs/architecture.md](docs/architecture.md) (episodic grooming section).
+Batch script → `scripts/episodic_grooming_run.py`; protocol in [docs/architecture.md](docs/architecture.md).
 
-Design spec → [docs/superpowers/specs/2026-06-01-mem-viewer-design.md](docs/superpowers/specs/2026-06-01-mem-viewer-design.md)
+Design spec → [docs/mem-viewer-design.md](docs/mem-viewer-design.md)
 
 ## Project Layout
 
+See [README.md](README.md) for the full tree (Chinese). Key paths:
+
 ```text
-mem0-local-enhanced/          # This repo (source + docs)
-├── src/                      # Deploy to ~/.mem0/
-│   ├── mcp_server_local.py
-│   ├── mem0_add_policy.py
-│   ├── hybrid_search.py
-│   ├── mem0_hook.py
-│   ├── mem_viewer.py
-│   ├── memory_lineage.py
-│   ├── grooming_metadata.py    # episodic grooming metadata protocol
-│   ├── grooming_episodic.py    # AI suggestions + merge hints logic
-│   └── ...
-├── scripts/
-│   ├── review_helpers.py       # Review: snapshot/diff/missed-run/resume log
-│   └── episodic_grooming_run.py  # episodic grooming batch job
-├── configs/                  # Config templates
-└── docs/
-    ├── architecture.md
-    ├── daily-review-integration.md
-    ├── claude-code-setup.md
-    └── cursor-setup.md
-
-~/.mem0/                      # Runtime (install target)
-├── pending/                  # Failed-write queue
-├── grooming-merge-hints.json # Session merge hints (overwritten each grooming run)
-├── chroma_db/
-└── history.db
-
-~/.claude/skills/daily-review/  # Review flow (external, used with this repo)
-~/daily-reviews/                # Review output
+src/           → deploy to ~/.mem0/
+scripts/       → setup.sh, review_helpers.py, episodic_grooming_run.py, english_grooming_run.py
+configs/       → JSON templates + config.example.yaml (reference only)
+docs/          → architecture, IDE setup, daily review, mem-viewer-design
+~/.mem0/       → runtime: pending/, sync_pending/, active_memories.db, deleted_archive.db, chroma_db/, ...
 ```
 
 ## Environment Variables
@@ -193,17 +173,23 @@ mem0-local-enhanced/          # This repo (source + docs)
 | `MEM0_DIR` | `~/.mem0` | Install directory |
 | `MEM0_CONFIG` | `~/.mem0/config_local.json` | Primary config |
 | `MEM0_FALLBACK_CONFIG` | `~/.mem0/config_ollama.json` | Fallback config |
+| `MEM0_CHROMA_PATH` | `~/.mem0/chroma_db` | Chroma path |
+| `MEM0_HISTORY_DB` | `~/.mem0/history.db` | History audit DB |
+| `MEM0_ACTIVE_DB` | `~/.mem0/active_memories.db` | Active query DB (keyword source) |
+| `MEM0_DELETED_DB` | `~/.mem0/deleted_archive.db` | Deletion archive |
+| `MEM0_PROJECT_ALIASES` | `~/.mem0/project_aliases.json` | Dir name → project map |
 | `MEM0_USER_ID` | `default-user` | User ID |
-| `MEM0_VECTOR_REL_MARGIN` | `0.10` | Vector relative cutoff; set `0` to disable |
-| `MEM0_KW_REL_RATIO` | `0.25` | Keyword relative cutoff; set `0` to disable |
+| `MEM0_DEFAULT_USER_ID` | same as `MEM0_USER_ID` | hybrid_search fallback |
+| `MEM0_VECTOR_REL_MARGIN` | `0.10` | Vector relative cutoff; `0` disables |
+| `MEM0_KW_REL_RATIO` | `0.25` | Keyword relative cutoff; `0` disables |
 
 ## Known Limitations
 
-- Ollama must stay running (common failure after reboot; configure login item or manual start)
-- Cross-word synonyms (e.g. 淋雨↔下雨) rely on the vector path; no manual synonym table
-- AnthropicLLM provider does not pass `response_format` (affects infer/merge if re-enabled)
-- Chroma metadata is scalar-only; nested dicts need `structured_json` serialization
-- Chroma `update` merges metadata; clearing fields requires `0`/empty string (e.g. `grooming_pending=0`), not key deletion
+- Ollama must stay running (common failure after reboot)
+- Cross-word synonyms rely on the vector path; no manual synonym table
+- AnthropicLLM provider does not pass `response_format`
+- Chroma metadata is scalar-only; nested dicts need `structured_json`
+- Chroma `update` merges metadata; clearing fields requires `0`/empty string, not key deletion
 
 ## License
 

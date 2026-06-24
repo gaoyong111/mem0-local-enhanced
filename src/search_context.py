@@ -4,7 +4,7 @@ import json
 import os
 import sys
 
-_MEM0_DIR = os.path.expanduser('~/.mem0')
+_MEM0_DIR = os.getenv('MEM0_DIR', os.path.expanduser('~/.mem0'))
 if _MEM0_DIR not in sys.path:
     sys.path.insert(0, _MEM0_DIR)
 

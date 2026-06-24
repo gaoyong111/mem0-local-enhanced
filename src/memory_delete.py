@@ -9,9 +9,7 @@ from typing import Any, Callable
 
 from memory_lineage import record_event
 
-DELETED_DB = os.path.expanduser('~/.mem0/deleted_archive.db')
-HISTORY_DB = os.path.expanduser('~/.mem0/history.db')
-CHROMA_DB_PATH = os.path.expanduser('~/.mem0/chroma_db')
+from mem0_paths import CHROMA_DB_PATH, DELETED_DB, HISTORY_DB
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS deleted_memories (

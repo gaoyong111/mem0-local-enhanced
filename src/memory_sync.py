@@ -12,10 +12,8 @@ from typing import Any
 
 from memory_lineage import record_event
 
-ACTIVE_DB = os.path.expanduser('~/.mem0/active_memories.db')
-HISTORY_DB = os.path.expanduser('~/.mem0/history.db')
-CHROMA_DB_PATH = os.path.expanduser('~/.mem0/chroma_db')
-SYNC_PENDING_DIR = os.path.expanduser('~/.mem0/sync_pending')
+from mem0_paths import ACTIVE_DB, CHROMA_DB_PATH, HISTORY_DB, SYNC_PENDING_DIR
+
 MAX_SYNC_RETRY = 3
 
 from memory_delete import (  # noqa: E402

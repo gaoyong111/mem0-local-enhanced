@@ -16,7 +16,8 @@ mkdir -p "$MEM0_DIR"
 echo "[1/6] 目录已创建"
 
 # 2. 复制源码
-cp "$REPO_ROOT/src/*.py" "$MEM0_DIR/"
+cp "$REPO_ROOT/src/"*.py "$MEM0_DIR/"
+cp "$REPO_ROOT/src/mem_viewer.sh" "$MEM0_DIR/"
 echo "[2/6] 源码已复制"
 
 # 3. 项目别名

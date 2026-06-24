@@ -67,7 +67,7 @@ cron prompt（`~/.claude/scheduled_tasks.json`）仅负责定时触发 + 降级�
 
 ## pending 队列（统一路径）
 
-**唯一路径**：`~/.mem0/pending/`
+**add 失败**：`~/.mem0/pending/` · **多表同步失败**：`~/.mem0/sync_pending/`（`retry_pending` 一并重试）
 
 | 来源 | 触发条件 |
 |------|----------|
@@ -98,7 +98,7 @@ JSON 格式：
 
 ```bash
 HELPER=~/.claude/skills/daily-review/scripts/review_helpers.py
-# 或：HELPER=~/Desktop/mem0-local-enhanced/scripts/review_helpers.py
+# 或仓库内：HELPER=scripts/review_helpers.py（在 mem0-local-enhanced 根目录执行）
 
 python3 $HELPER check-missed-run
 python3 $HELPER diff --baseline latest --output ~/daily-reviews/.data/mem0-diff-YYYYMMDD.json
@@ -142,10 +142,10 @@ Claude Code cron 有生命周期限制。每日复盘 cron（`3 18 * * *`）在 
 
 ```bash
 # 默认：待确认或无 grooming_at 的 episodic
-MEM0_DIR=~/.mem0 python3 ~/Desktop/mem0-local-enhanced/scripts/episodic_grooming_run.py
+MEM0_DIR=~/.mem0 python3 scripts/episodic_grooming_run.py
 
 # 预览
-MEM0_DIR=~/.mem0 python3 ~/Desktop/mem0-local-enhanced/scripts/episodic_grooming_run.py --dry-run
+MEM0_DIR=~/.mem0 python3 scripts/episodic_grooming_run.py --dry-run
 ```
 
 | 输出 | 存储 |

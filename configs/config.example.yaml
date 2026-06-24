@@ -1,3 +1,4 @@
+# 参考用 YAML 格式，与 config_api.example.json 等价；mem0 运行时仅加载 JSON。
 version: "1.0"
 custom_instructions: "输出语言必须与用户输入一致；输入为中文时记忆正文必须用中文，禁止翻译成英文。保留模块名、字段名、权限ID、API名等原文标识符。只做抽取与去重，不要改写成英文散文。"
 embedder:
