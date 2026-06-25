@@ -17,7 +17,32 @@ DATA_DIR = os.path.join(REVIEW_DIR, '.data')
 HISTORY_DB = os.path.join(MEM0_DIR, 'history.db')
 CHROMA_DB_PATH = os.path.join(MEM0_DIR, 'chroma_db')
 CRON_RENEWAL_LOG = os.path.join(REVIEW_DIR, 'cron-renewal.log')
+LAST_SCAN_END_FILE = os.path.join(DATA_DIR, 'last-scan-end.txt')
 MISSED_RUN_HOURS = 36
+
+
+def _load_cron_last_fired() -> float | None:
+    """读 ~/.claude/scheduled_tasks.json，返回复盘 cron 的 lastFiredAt（Unix 秒）。
+
+    仅返回 lastFiredAt，不含 createdAt（createdAt 可能是几天前，不适合做扫描边界）。
+    """
+    path = os.path.expanduser('~/.claude/scheduled_tasks.json')
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path) as f:
+            cfg = json.load(f)
+    except Exception:
+        return None
+    tasks = cfg.get('tasks') or []
+    review_tasks = [
+        t for t in tasks
+        if 'daily-review/SKILL.md' in (t.get('prompt') or '')
+    ]
+    if not review_tasks:
+        return None
+    fired = [t.get('lastFiredAt') for t in review_tasks if t.get('lastFiredAt')]
+    return max(fired) / 1000.0 if fired else None
 
 
 def _load_deleted_memory_ids(conn: sqlite3.Connection) -> set[str]:
@@ -176,23 +201,71 @@ def find_latest_review() -> tuple[str, float] | None:
 
 
 def cmd_check_missed_run(args: argparse.Namespace) -> int:
-    latest = find_latest_review()
-    if not latest:
-        print(json.dumps({'missed': False, 'reason': 'no prior review'}, ensure_ascii=False))
-        return 0
+    """检测漏跑 + 返回下次扫描起点。
 
-    path, mtime = latest
-    hours = (datetime.now().timestamp() - mtime) / 3600
+    scan_start 优先级：
+    1. .data/last-scan-end.txt（上次复盘结束时记录的 lastFiredAt）
+    2. 最新复盘文件 mtime（fallback）
+    """
+    scan_start_str = None
+    scan_start_ts = None
+    scan_start_source = None
+    if os.path.exists(LAST_SCAN_END_FILE):
+        with open(LAST_SCAN_END_FILE, encoding='utf-8') as f:
+            scan_start_str = f.read().strip()
+        try:
+            scan_start_ts = datetime.strptime(scan_start_str, '%Y-%m-%d %H:%M').timestamp()
+            scan_start_source = 'last-scan-end.txt'
+        except ValueError:
+            scan_start_str = None
+
+    latest = find_latest_review()
+    if scan_start_ts is None:
+        if not latest:
+            print(json.dumps({'missed': False, 'reason': 'no prior review'}, ensure_ascii=False))
+            return 0
+        _, scan_start_ts = latest
+        scan_start_str = datetime.fromtimestamp(scan_start_ts).strftime('%Y-%m-%d %H:%M')
+        scan_start_source = 'file_mtime_fallback'
+
+    hours = (datetime.now().timestamp() - scan_start_ts) / 3600
     missed = hours > MISSED_RUN_HOURS
     result = {
         'missed': missed,
-        'latest_review': path,
-        'latest_mtime': datetime.fromtimestamp(mtime).strftime('%Y-%m-%d %H:%M'),
-        'hours_since': round(hours, 1),
+        'scan_start': scan_start_str,
+        'scan_start_source': scan_start_source,
+        'latest_review': latest[0] if latest else None,
+        'hours_since_scan_start': round(hours, 1),
         'threshold_hours': MISSED_RUN_HOURS,
         'banner': '⚠️ 疑似漏跑，覆盖范围可能跨天' if missed else '',
     }
     print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_record_scan_end(args: argparse.Namespace) -> int:
+    """本次复盘结束时调用：把扫描边界写入 .data/last-scan-end.txt。
+
+    默认写 cron lastFiredAt（复盘可能拖到下午才写完，仍以触发时刻为边界）。
+    --manual：手动复盘，写 now。
+    无 lastFiredAt 时 fallback 到 now。
+    """
+    os.makedirs(DATA_DIR, exist_ok=True)
+    if args.manual:
+        end_ts = datetime.now().timestamp()
+        src = 'now_manual'
+    else:
+        cron_fired = _load_cron_last_fired()
+        if cron_fired:
+            end_ts = cron_fired
+            src = 'cron_lastFiredAt'
+        else:
+            end_ts = datetime.now().timestamp()
+            src = 'now_fallback'
+    end_str = datetime.fromtimestamp(end_ts).strftime('%Y-%m-%d %H:%M')
+    with open(LAST_SCAN_END_FILE, 'w', encoding='utf-8') as f:
+        f.write(end_str)
+    print(f'OK scan end recorded: {end_str} (source={src})')
     return 0
 
 
@@ -229,6 +302,10 @@ def main() -> int:
     p_renewal.add_argument('--new', required=True)
     p_renewal.add_argument('--note', default='')
     p_renewal.set_defaults(func=cmd_log_cron_renewal)
+
+    p_scan_end = sub.add_parser('record-scan-end', help='记录本次扫描终点到 .data/last-scan-end.txt')
+    p_scan_end.add_argument('--manual', action='store_true', help='手动复盘：写 now 而非 cron lastFiredAt')
+    p_scan_end.set_defaults(func=cmd_record_scan_end)
 
     args = parser.parse_args()
     return args.func(args)
