@@ -312,7 +312,7 @@ mem0 的 `AnthropicLLM` provider 不会将 `response_format` 参数传递给底�
 
 ## 相关文档
 
-- [每日复盘集成](daily-review-integration.md) — cron、pending、快照 diff、进化提取
+- [每日复盘集成](daily-review-integration.md) — cron、pending、快照 diff、会话来源、进化提取
 - [mem_viewer 设计规格](mem-viewer-design.md) — Web UI API、检索条数、grooming 面板
 - [Claude Code 集成](claude-code-setup.md)
 - [Cursor 集成](cursor-setup.md)

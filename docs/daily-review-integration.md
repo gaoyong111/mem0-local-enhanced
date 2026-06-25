@@ -26,20 +26,46 @@ mem0-local-enhanced 负责**记忆的存、搜、注入**；每日复盘负责**
 
 ## 对话深度分析（采集环节）
 
+**先拉会话清单**（对话分析开始前）：
+
+```bash
+HELPER=~/.claude/skills/daily-review/scripts/review_helpers.py
+DATE=$(date +%Y%m%d)
+python3 $HELPER list-sessions \
+  --since "<扫描起点>" \
+  --output ~/daily-reviews/.data/session-inventory-${DATE}.json
+```
+
 用多代理并行扫描 Claude 和 Cursor 会话 JSONL。
 
-**筛选方式**：按 JSONL 内部 `timestamp` 字段过滤，不用文件修改时间。文件 mtime 可能因编辑而更新，不代表内容实际发生在范围内。
-
 **每个会话文件都必须派代理扫描**，不论长短。短会话代理几秒就完成，但跳过可能遗漏关键信息。
+
+每个代理除常规提取外，还须返回一行「提取内容摘要」（15~40 字），供文档末尾 `## 会话来源` 引用。
 
 特别关注：
 - 用户重复要求的操作（AI没做到位）
 - 用户频繁提出的问题（可固化为经验）
 - 用户随口偏好或吐槽（preference 类记忆来源）
 
-**筛选方式**：
-- Claude Code 会话：按 JSONL 内部 `timestamp` 字段过滤（精确）
-- Cursor 会话：Cursor JSONL 只有 `role` + `message` 无 `timestamp`，改用文件 `mtime` 筛选（mtime ≥ 时间起点即视为相关）。排除 `/subagents/` 子目录
+**筛选方式**（Claude 与 Cursor 策略不同，不可混用）：
+- **Claude Code 会话**：按 JSONL 内部 `timestamp` 字段过滤（精确）
+- **Cursor 会话**：Cursor JSONL 只有 `role` + `message` 无 `timestamp`，改用文件 `mtime` 筛选（mtime ≥ 时间起点即视为相关）。排除 `/subagents/` 子目录
+
+## 复盘文档：会话来源（文档最末尾）
+
+参考文献式溯源，位于基础设施告警、配置变更记录等**所有章节之后**：
+
+| # | 容器 | 项目 | 会话 ID | 提取内容摘要 |
+|---|------|------|---------|-------------|
+| 1 | Cursor | ehealth-weixin-h5 | fd45e6b1 | 用药指导接口与桌面 docx 比对，发现缺参 |
+| 2 | Claude | (全局) | 89bf86c0 | cron 复盘主会话：多代理扫描、写文档 |
+
+- **容器**：`Claude` / `Cursor`
+- **项目**：从会话路径解码（如 `ngaripc`）；无具体项目写 `(全局)`
+- **会话 ID**：UUID 前 8 位，与正文引用一致
+- **提取内容摘要**：该会话对本次复盘贡献了什么；无实质内容写「无实质内容」
+
+权威格式见 `~/.claude/skills/daily-review/SKILL.md`「输出格式 → 会话来源」。
 
 ## 权威流程
 
@@ -101,12 +127,16 @@ HELPER=~/.claude/skills/daily-review/scripts/review_helpers.py
 # 或仓库内：HELPER=scripts/review_helpers.py（在 mem0-local-enhanced 根目录执行）
 
 python3 $HELPER check-missed-run
+python3 $HELPER list-sessions --since "YYYY-MM-DD HH:MM" \
+  --output ~/daily-reviews/.data/session-inventory-YYYYMMDD.json
 python3 $HELPER diff --baseline latest --output ~/daily-reviews/.data/mem0-diff-YYYYMMDD.json
 python3 $HELPER snapshot
+python3 $HELPER record-scan-end
 python3 $HELPER log-cron-renewal --old <旧id> --new <新id>
 ```
 
 - 读 `history.db` + Chroma metadata，**不依赖 Ollama**
+- 会话清单：`~/daily-reviews/.data/session-inventory-YYYYMMDD.json`（容器/项目/ID，代理填摘要后写入文档末尾）
 - 快照：`~/daily-reviews/.data/mem0-snapshot-YYYYMMDD.json`
 - diff 报告：`~/daily-reviews/.data/mem0-diff-YYYYMMDD.json`
 - 续期日志：`~/daily-reviews/cron-renewal.log`
@@ -166,8 +196,8 @@ MEM0_DIR=~/.mem0 python3 scripts/episodic_grooming_run.py --dry-run
 |------|------|
 | `~/.mem0/` | mem0 运行时（本仓库 src 部署目标） |
 | `~/.claude/skills/daily-review/SKILL.md` | 复盘流程权威文档 |
-| `~/daily-reviews/` | 复盘文档、TODO-tracker（备注必须写详细：为什么提、什么场景触发、预期方向） |
-| `~/daily-reviews/.data/` | 快照、diff 报告（机器数据，与文档分离） |
+| `~/daily-reviews/` | 复盘文档（末尾含「会话来源」）、TODO-tracker（备注必须写详细：为什么提、什么场景触发、预期方向） |
+| `~/daily-reviews/.data/` | 快照、diff 报告、session-inventory（机器数据，与文档分离） |
 | `~/.claude/scheduled_tasks.json` | cron 持久化配置 |
 | `~/.cursor/hooks.json` | Cursor beforeSubmitPrompt |
 | `~/.cursor/mcp.json` | Cursor MCP mem0-local |

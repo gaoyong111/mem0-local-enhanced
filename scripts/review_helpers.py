@@ -1,4 +1,4 @@
-"""每日复盘辅助：mem0 快照/diff、漏跑检测、cron 续期日志。不依赖 Ollama。"""
+"""每日复盘辅助：mem0 快照/diff、漏跑检测、cron 续期日志、会话清单。不依赖 Ollama。"""
 
 from __future__ import annotations
 
@@ -19,6 +19,124 @@ CHROMA_DB_PATH = os.path.join(MEM0_DIR, 'chroma_db')
 CRON_RENEWAL_LOG = os.path.join(REVIEW_DIR, 'cron-renewal.log')
 LAST_SCAN_END_FILE = os.path.join(DATA_DIR, 'last-scan-end.txt')
 MISSED_RUN_HOURS = 36
+CLAUDE_PROJECT_PREFIXES = (
+    '-Users-gaoyong-Desktop-h5-release-',
+    'Users-gaoyong-Desktop-h5-release-',
+    '-Users-gaoyong-Desktop-',
+    'Users-gaoyong-Desktop-',
+    '-Users-gaoyong-',
+    'Users-gaoyong-',
+)
+
+
+def _parse_since(since: str) -> float:
+    """解析 --since 参数为 Unix 时间戳。"""
+    for fmt in ('%Y-%m-%d %H:%M', '%Y-%m-%d %H:%M:%S', '%Y-%m-%d'):
+        try:
+            return datetime.strptime(since, fmt).timestamp()
+        except ValueError:
+            continue
+    raise ValueError(f'无法解析时间: {since}')
+
+
+def _decode_project_dir(project_dir: str) -> str:
+    """从 Claude/Cursor 项目目录名解码可读项目名。"""
+    name = project_dir.lstrip('-')
+    for prefix in CLAUDE_PROJECT_PREFIXES:
+        clean = prefix.lstrip('-')
+        if name.startswith(clean):
+            decoded = name[len(clean):]
+            return decoded or '(全局)'
+    if name in ('Users-gaoyong',):
+        return '(全局)'
+    return name or project_dir
+
+
+def _project_from_session_path(path: str, container: str) -> str:
+    """从会话 JSONL 路径提取项目名。"""
+    marker = '/projects/'
+    if marker not in path:
+        return 'unknown'
+    rest = path.split(marker, 1)[1]
+    project_dir = rest.split('/', 1)[0]
+    return _decode_project_dir(project_dir)
+
+
+def _session_id_from_path(path: str) -> str:
+    """从路径提取会话 ID 短码（UUID 前 8 位）。"""
+    base = os.path.basename(path)
+    if base.endswith('.jsonl'):
+        base = base[:-6]
+    if base.startswith('agent-'):
+        return base[:8]
+    return base.split('-')[0][:8]
+
+
+def _parse_jsonl_timestamp(raw: Any) -> float | None:
+    """解析 Claude JSONL 行内 timestamp。"""
+    if raw is None:
+        return None
+    if isinstance(raw, (int, float)):
+        return raw / 1000.0 if raw > 1e12 else float(raw)
+    if isinstance(raw, str):
+        try:
+            return datetime.fromisoformat(raw.replace('Z', '+00:00')).timestamp()
+        except ValueError:
+            return None
+    return None
+
+
+def _claude_session_in_range(path: str, since_ts: float) -> bool:
+    """Claude 会话：任一行 timestamp ≥ since 即纳入。"""
+    try:
+        with open(path, encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                obj = json.loads(line)
+                ts = _parse_jsonl_timestamp(obj.get('timestamp'))
+                if ts is not None and ts >= since_ts:
+                    return True
+    except (OSError, json.JSONDecodeError):
+        return False
+    return False
+
+
+def _collect_session_inventory(since_ts: float) -> list[dict[str, Any]]:
+    """扫描 Claude + Cursor 会话，返回结构化清单（不含提取摘要）。"""
+    sessions: list[dict[str, Any]] = []
+
+    claude_glob = os.path.expanduser('~/.claude/projects/**/*.jsonl')
+    for path in glob.glob(claude_glob, recursive=True):
+        if '/subagents/' in path:
+            continue
+        if not _claude_session_in_range(path, since_ts):
+            continue
+        sessions.append({
+            'id': _session_id_from_path(path),
+            'container': 'Claude',
+            'project': _project_from_session_path(path, 'claude'),
+            'path': path,
+            'filter': 'timestamp',
+        })
+
+    cursor_glob = os.path.expanduser('~/.cursor/projects/**/agent-transcripts/**/*.jsonl')
+    for path in glob.glob(cursor_glob, recursive=True):
+        if '/subagents/' in path:
+            continue
+        if os.path.getmtime(path) < since_ts:
+            continue
+        sessions.append({
+            'id': _session_id_from_path(path),
+            'container': 'Cursor',
+            'project': _project_from_session_path(path, 'cursor'),
+            'path': path,
+            'filter': 'mtime',
+        })
+
+    sessions.sort(key=lambda s: (s['container'], s['project'], s['id']))
+    return sessions
 
 
 def _load_cron_last_fired() -> float | None:
@@ -269,6 +387,49 @@ def cmd_record_scan_end(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_list_sessions(args: argparse.Namespace) -> int:
+    """列出时间范围内的 Claude/Cursor 会话清单。"""
+    since_ts = _parse_since(args.since)
+    sessions = _collect_session_inventory(since_ts)
+    claude_count = sum(1 for s in sessions if s['container'] == 'Claude')
+    cursor_count = sum(1 for s in sessions if s['container'] == 'Cursor')
+    report = {
+        'since': args.since,
+        'since_ts': since_ts,
+        'total': len(sessions),
+        'claude': claude_count,
+        'cursor': cursor_count,
+        'sessions': sessions,
+    }
+
+    if args.output:
+        os.makedirs(os.path.dirname(args.output) or '.', exist_ok=True)
+        with open(args.output, 'w', encoding='utf-8') as f:
+            json.dump(report, f, ensure_ascii=False, indent=2)
+        print(f'OK session inventory: {args.output} ({len(sessions)} sessions)')
+
+    if args.markdown:
+        lines = [
+            f"> 共扫描 {len(sessions)} 个会话（Claude {claude_count} + Cursor {cursor_count}）。"
+            f"筛选起点：{args.since}",
+            '',
+            '| # | 容器 | 项目 | 会话 ID | 提取内容摘要 |',
+            '|---|------|------|---------|-------------|',
+        ]
+        for idx, s in enumerate(sessions, 1):
+            lines.append(
+                f"| {idx} | {s['container']} | {s['project']} | {s['id']} | （待代理扫描后填写） |"
+            )
+        md = '\n'.join(lines)
+        with open(args.markdown, 'w', encoding='utf-8') as f:
+            f.write(md)
+        print(f'OK session markdown stub: {args.markdown}')
+
+    if not args.output and not args.markdown:
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+    return 0
+
+
 def cmd_log_cron_renewal(args: argparse.Namespace) -> int:
     os.makedirs(DATA_DIR, exist_ok=True)
     line = (
@@ -306,6 +467,12 @@ def main() -> int:
     p_scan_end = sub.add_parser('record-scan-end', help='记录本次扫描终点到 .data/last-scan-end.txt')
     p_scan_end.add_argument('--manual', action='store_true', help='手动复盘：写 now 而非 cron lastFiredAt')
     p_scan_end.set_defaults(func=cmd_record_scan_end)
+
+    p_sessions = sub.add_parser('list-sessions', help='列出时间范围内的 Claude/Cursor 会话')
+    p_sessions.add_argument('--since', required=True, help='扫描起点，如 "2026-06-24 11:50"')
+    p_sessions.add_argument('--output', help='JSON 清单输出路径')
+    p_sessions.add_argument('--markdown', help='Markdown 表格 stub 输出路径')
+    p_sessions.set_defaults(func=cmd_list_sessions)
 
     args = parser.parse_args()
     return args.func(args)

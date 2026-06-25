@@ -55,8 +55,8 @@
 |------|------|
 | 流程权威 | `~/.claude/skills/daily-review/SKILL.md` |
 | cron 触发 | `~/.claude/scheduled_tasks.json`（18:03，prompt 仅引用 skill） |
-| 辅助脚本 | `scripts/review_helpers.py`（快照/diff/漏跑检测/续期日志） |
-| 产出目录 | `~/daily-reviews/`（复盘文档、TODO-tracker、mem0-snapshot-*.json） |
+| 辅助脚本 | `scripts/review_helpers.py`（快照/diff/漏跑/续期/会话清单） |
+| 产出目录 | `~/daily-reviews/`（复盘文档含末尾「会话来源」、TODO-tracker、mem0-snapshot-*.json） |
 
 Preflight 检查 Ollama + MCP；不可用时**降级模式**（文档照常，跳过 mem0 写入）。
 
@@ -116,6 +116,7 @@ python3 ~/.mem0/mem_viewer.py   # 或 bash ~/.mem0/mem_viewer.sh → http://loca
 
 # 复盘辅助
 python3 scripts/review_helpers.py check-missed-run
+python3 scripts/review_helpers.py list-sessions --since "2026-06-24 11:50"
 python3 scripts/review_helpers.py snapshot
 
 # episodic 梳理（写 AI 建议 + merge hints；mem_viewer 关闭时 LLM 更稳）
@@ -190,7 +191,7 @@ mem0-local-enhanced/          # 本仓库（源码 + 文档）
 │   └── grooming_episodic.py  # AI 建议 + merge hints 逻辑
 ├── scripts/
 │   ├── setup.sh                # 一键初始化 ~/.mem0
-│   ├── review_helpers.py       # 复盘：快照/diff/漏跑/续期日志
+│   ├── review_helpers.py       # 复盘：快照/diff/漏跑/续期/会话清单 list-sessions
 │   ├── episodic_grooming_run.py  # episodic 梳理批处理（可重复）
 │   └── english_grooming_run.py   # 历史 infer 英文遗留一次性迁移（含硬编码 ID）
 ├── configs/

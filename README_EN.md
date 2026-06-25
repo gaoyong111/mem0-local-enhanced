@@ -55,8 +55,8 @@ Daily review (cron 18:03 + skill) → evolve memories → snapshot baseline
 |-----------|------|
 | Authoritative flow | `~/.claude/skills/daily-review/SKILL.md` |
 | Cron trigger | `~/.claude/scheduled_tasks.json` (18:03, prompt references skill only) |
-| Helper scripts | `scripts/review_helpers.py` (snapshot/diff/missed-run/resume log) |
-| Output dir | `~/daily-reviews/` (review docs, TODO-tracker, mem0-snapshot-*.json) |
+| Helper scripts | `scripts/review_helpers.py` (snapshot/diff/missed-run/renewal log/session inventory) |
+| Output dir | `~/daily-reviews/` (review docs with trailing **Session sources** section, TODO-tracker, mem0-snapshot-*.json) |
 
 Preflight checks Ollama + MCP; **degraded mode** when unavailable (docs still generated, mem0 writes skipped).
 
@@ -106,6 +106,7 @@ python3 ~/.mem0/search_context.py "test query"
 python3 ~/.mem0/mcp_server_local.py
 python3 ~/.mem0/mem_viewer.py   # or bash ~/.mem0/mem_viewer.sh → http://localhost:8765
 python3 scripts/review_helpers.py check-missed-run
+python3 scripts/review_helpers.py list-sessions --since "2026-06-24 11:50"
 python3 scripts/review_helpers.py snapshot
 MEM0_DIR=~/.mem0 python3 scripts/episodic_grooming_run.py --dry-run
 ```
