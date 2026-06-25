@@ -20,7 +20,7 @@ mem0-local-enhanced 负责**记忆的存、搜、注入**；每日复盘负责**
                               ↓
 ┌─────────────────────────────────────────────────────────────┐
 │ 每日复盘（Claude Code cron 18:03 + skill）                    │
-│ Preflight → 采集 → pending重试 → 写文档 → 进化提取 → 快照    │
+│ Preflight → 采集 → pending重试 → 写文档 → 进化提取 → 升格建议 → grooming → 快照 │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -85,7 +85,7 @@ cron prompt（`~/.claude/scheduled_tasks.json`）仅负责定时触发 + 降级�
 | 漏跑 | `review_helpers.py check-missed-run` | 文档开头加 banner |
 
 **降级模式**（Ollama 或 MCP 不可用）：
-- 跳过：pending 重试、进化提取、memory-grooming
+- 跳过：pending 重试、进化提取、升格建议、memory-grooming
 - 照常：git、对话分析、复盘文档、TODO-tracker、工具统计
 - 文档末尾写 `## 基础设施告警`
 
@@ -166,6 +166,18 @@ Claude Code cron 有生命周期限制。每日复盘 cron（`3 18 * * *`）在 
 
 每条须含 **Why** + **How to apply**。写入前 `search_memory` 查重；统一 `infer=false`；category 漏填默认 episodic（自动 `grooming_pending=1`）。
 
+## 升格建议（mem0 → CLAUDE.md P0/P1）
+
+进化提取之后、memory-grooming 之前：评估 mem0 条目是否应升格到 `~/.claude/CLAUDE.md` P0/P1。
+
+- **只写建议**，不自动改 CLAUDE.md / `global-user-rules.md`
+- **无候选写「无」**，不硬凑
+- grooming 的 `promote→behavior` 仍在 mem0 内；升格建议是再筛一层——是否该进全局硬规则
+
+纳入须同时满足：跨话题、已验证（重复 correction / grooming promote）、可二元化、不与现有 P0/P1 重复。
+
+写入复盘文档 `## 升格建议`（位于 `## mem0 变化` 之后）。权威判定见 `~/.claude/skills/daily-review/SKILL.md`「升格建议」章节。
+
 ## memory-grooming（episodic 人机梳理）
 
 复盘 **memory-grooming** 阶段（mem0 可用时）：**不自动删/合/升 episodic**，只写 AI 建议，用户在 mem_viewer 确认。
@@ -196,7 +208,7 @@ MEM0_DIR=~/.mem0 python3 scripts/episodic_grooming_run.py --dry-run
 |------|------|
 | `~/.mem0/` | mem0 运行时（本仓库 src 部署目标） |
 | `~/.claude/skills/daily-review/SKILL.md` | 复盘流程权威文档 |
-| `~/daily-reviews/` | 复盘文档（末尾含「会话来源」）、TODO-tracker（备注必须写详细：为什么提、什么场景触发、预期方向） |
+| `~/daily-reviews/` | 复盘文档（含「升格建议」「会话来源」）、TODO-tracker |
 | `~/daily-reviews/.data/` | 快照、diff 报告、session-inventory（机器数据，与文档分离） |
 | `~/.claude/scheduled_tasks.json` | cron 持久化配置 |
 | `~/.cursor/hooks.json` | Cursor beforeSubmitPrompt |
