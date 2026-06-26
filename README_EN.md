@@ -24,7 +24,7 @@ Runtime injection (L1 warm-start / L2 Hook / L3 MCP search)
         ↓
 ~/.mem0/  hybrid_search · mem0_add_policy · MCP · pending · mem_viewer
         ↓
-Daily review (cron 18:03 + skill) → evolve memories → promotion suggestions → snapshot baseline
+Daily review (cron 9:30 + skill) → evolve memories → promotion suggestions → snapshot baseline
 ```
 
 → [docs/architecture.md](docs/architecture.md) · [docs/daily-review-integration.md](docs/daily-review-integration.md)
@@ -54,11 +54,11 @@ Daily review (cron 18:03 + skill) → evolve memories → promotion suggestions 
 | Component | Path |
 |-----------|------|
 | Authoritative flow | `~/.claude/skills/daily-review/SKILL.md` |
-| Cron trigger | `~/.claude/scheduled_tasks.json` (18:03, prompt references skill only) |
+| Cron trigger | `~/.claude/scheduled_tasks.json` (9:30, prompt references skill only) |
 | Helper scripts | `scripts/review_helpers.py` (snapshot/diff/missed-run/renewal log/session inventory) |
 | Output dir | `~/daily-reviews/` (review docs with **Promotion suggestions** + **Session sources**, TODO-tracker, mem0-snapshot-*.json) |
 
-Preflight checks Ollama + MCP; **degraded mode** when unavailable (docs still generated, mem0 writes skipped).
+Preflight checks permissions + Ollama + MCP; **degraded mode** when unavailable (docs still generated, mem0 writes skipped).
 
 ## Quick Start
 

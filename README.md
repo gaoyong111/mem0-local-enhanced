@@ -24,7 +24,7 @@
         ↓
 ~/.mem0/  hybrid_search · mem0_add_policy · MCP · pending · mem_viewer
         ↓
-每日复盘（cron 18:03 + skill）→ 进化提取写回 mem0 → 升格建议 → 快照 baseline
+每日复盘（cron 9:30 + skill）→ 进化提取写回 mem0 → 升格建议 → 快照 baseline
 ```
 
 → 详细设计：[docs/architecture.md](docs/architecture.md) · [docs/daily-review-integration.md](docs/daily-review-integration.md)
@@ -54,11 +54,11 @@
 | 组件 | 路径 |
 |------|------|
 | 流程权威 | `~/.claude/skills/daily-review/SKILL.md` |
-| cron 触发 | `~/.claude/scheduled_tasks.json`（18:03，prompt 仅引用 skill） |
+| cron 触发 | `~/.claude/scheduled_tasks.json`（9:30，prompt 仅引用 skill） |
 | 辅助脚本 | `scripts/review_helpers.py`（快照/diff/漏跑/续期/会话清单） |
 | 产出目录 | `~/daily-reviews/`（复盘文档含「升格建议」「会话来源」、TODO-tracker、mem0-snapshot-*.json） |
 
-Preflight 检查 Ollama + MCP；不可用时**降级模式**（文档照常，跳过 mem0 写入）。
+Preflight 检查权限 + Ollama + MCP；不可用时**降级模式**（文档照常，跳过 mem0 写入）。
 
 ## 快速开始
 

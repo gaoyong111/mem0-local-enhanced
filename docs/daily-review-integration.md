@@ -19,7 +19,7 @@ mem0-local-enhanced 负责**记忆的存、搜、注入**；每日复盘负责**
 └─────────────────────────────────────────────────────────────┘
                               ↓
 ┌─────────────────────────────────────────────────────────────┐
-│ 每日复盘（Claude Code cron 18:03 + skill）                    │
+│ 每日复盘（Claude Code cron 9:30 + skill）                    │
 │ Preflight → 采集 → pending重试 → 写文档 → 进化提取 → 升格建议 → grooming → 快照 │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -79,6 +79,7 @@ cron prompt（`~/.claude/scheduled_tasks.json`）仅负责定时触发 + 降级�
 
 | 检查项 | 命令/方式 | 失败影响 |
 |--------|-----------|----------|
+| 权限自检 | 检查 `settings.local.json` 的 `permissions.allow` 是否覆盖复盘核心 Bash/Write | don't ask 模式下执行到一半被阻塞，需用户按 Ctrl+C 才恢复 |
 | Ollama | `curl localhost:11434/api/tags` | embedding 不可用 |
 | mem0 MCP | `get_all_memories` / `search_memory` | 无法在线写入 |
 | pending | `ls ~/.mem0/pending/*.json` | 仅记录条数 |
@@ -143,7 +144,7 @@ python3 $HELPER log-cron-renewal --old <旧id> --new <新id>
 
 ## cron 自续期
 
-Claude Code cron 有生命周期限制。每日复盘 cron（`3 18 * * *`）在 `createdAt` 距今 **≥ 3 天** 时：
+Claude Code cron 有生命周期限制。每日复盘 cron（`30 9 * * *`）在 `createdAt` 距今 **≥ 3 天** 时：
 
 1. `CronCreate` 重建（同样 schedule + 精简 prompt）
 2. `review_helpers.py log-cron-renewal` 写日志
