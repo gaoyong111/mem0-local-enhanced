@@ -148,11 +148,9 @@ def _lineage_related_entries(memory_id: str, all_entries: list[dict[str, Any]]) 
 def _chroma_merged_from(memory_id: str) -> list[str]:
     """从 Chroma metadata 读取 merged_from（兼容 grooming 前已写入的合并标记）。"""
     try:
-        import chromadb
-        from hybrid_search import CHROMA_DB_PATH
+        from hybrid_search import get_chroma_client
 
-        client = chromadb.PersistentClient(path=CHROMA_DB_PATH)
-        col = client.get_collection('mem0')
+        col = get_chroma_client().get_collection('mem0')
         result = col.get(ids=[memory_id], include=['metadatas'])
         metas = result.get('metadatas') or []
         if not metas or not metas[0]:

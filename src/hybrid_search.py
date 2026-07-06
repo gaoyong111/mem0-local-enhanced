@@ -74,6 +74,30 @@ def _load_config() -> dict[str, Any]:
         return json.load(config_file)
 
 
+_CHROMA_CLIENT = None
+
+
+def _mem0_chroma_settings() -> Any:
+    """与 mem0.vector_stores.chroma.ChromaDB 本地 path 模式 settings 保持一致。"""
+    from chromadb.config import Settings
+
+    settings = Settings(anonymized_telemetry=False)
+    settings.persist_directory = CHROMA_DB_PATH
+    settings.is_persistent = True
+    return settings
+
+
+def get_chroma_client() -> Any:
+    """返回共享的 Chroma 客户端，settings 与 mem0 一致，避免同进程冲突。"""
+    global _CHROMA_CLIENT
+    if _CHROMA_CLIENT is not None:
+        return _CHROMA_CLIENT
+    import chromadb
+
+    _CHROMA_CLIENT = chromadb.Client(_mem0_chroma_settings())
+    return _CHROMA_CLIENT
+
+
 def normalize_project(project: str) -> str:
     """统一项目标识，空字符串表示全局。"""
     value = (project or '').strip()
@@ -277,10 +301,7 @@ def _load_memory_metadata() -> dict[str, dict[str, str]]:
         return metadata_map
 
     try:
-        import chromadb
-
-        client = chromadb.PersistentClient(path=CHROMA_DB_PATH)
-        col = client.get_collection('mem0')
+        col = get_chroma_client().get_collection('mem0')
         result = col.get(include=['metadatas'])
     except Exception:
         return {}
@@ -411,10 +432,7 @@ def vector_search(
         if not query_vector:
             return []
 
-        import chromadb
-
-        client = chromadb.PersistentClient(path=CHROMA_DB_PATH)
-        collection = client.get_collection('mem0')
+        collection = get_chroma_client().get_collection('mem0')
 
         n_results = top_k
         if filter_lang_en:
@@ -674,7 +692,7 @@ def backfill_lang_metadata(*, dry_run: bool = False) -> dict[str, int]:
     except ImportError:
         return {'error': 1}
 
-    client = chromadb.PersistentClient(path=CHROMA_DB_PATH)
+    client = get_chroma_client()
     collection = client.get_collection('mem0')
     raw = collection.get(include=['metadatas'])
     ids = raw.get('ids') or []

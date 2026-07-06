@@ -21,7 +21,7 @@ from mem0_add_policy import apply_mem0_patches  # noqa: E402
 apply_mem0_patches()
 
 from mem0 import Memory  # noqa: E402
-from hybrid_search import CHROMA_DB_PATH, HISTORY_DB  # noqa: E402
+from hybrid_search import get_chroma_client, HISTORY_DB  # noqa: E402
 from memory_lineage import record_event  # noqa: E402
 
 _CJK_RE = re.compile(r'[一-鿿]')
@@ -72,10 +72,7 @@ def delete_memory(memory_id: str, note: str = '') -> None:
 
 
 def update_metadata(memory_id: str, patches: dict[str, str]) -> None:
-    import chromadb
-
-    client = chromadb.PersistentClient(path=CHROMA_DB_PATH)
-    col = client.get_collection('mem0')
+    col = get_chroma_client().get_collection('mem0')
     raw = col.get(ids=[memory_id], include=['metadatas'])
     if not raw['ids']:
         raise ValueError(f'missing chroma id {memory_id}')
@@ -86,10 +83,7 @@ def update_metadata(memory_id: str, patches: dict[str, str]) -> None:
 
 
 def replace_text_keep_id(memory_id: str, new_text: str, meta_patches: dict[str, str]) -> None:
-    import chromadb
-
-    client = chromadb.PersistentClient(path=CHROMA_DB_PATH)
-    col = client.get_collection('mem0')
+    col = get_chroma_client().get_collection('mem0')
     raw = col.get(ids=[memory_id], include=['metadatas'])
     if not raw['ids']:
         raise ValueError(f'missing chroma id {memory_id}')
@@ -272,10 +266,7 @@ except Exception as exc:
     print('ADD workflow FAIL', exc)
 
 # --- 原地更新正文 ---
-import chromadb
-
-client = chromadb.PersistentClient(path=CHROMA_DB_PATH)
-col = client.get_collection('mem0')
+col = get_chroma_client().get_collection('mem0')
 raw = col.get(ids=['330226b8-fa49-4d69-8131-7d575992cb29'], include=['metadatas'])
 base_text = str((raw['metadatas'][0] or {}).get('data', ''))
 merged_330 = (

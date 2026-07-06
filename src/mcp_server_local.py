@@ -334,11 +334,9 @@ def confirm_grooming(memory_id: str) -> str:
     try:
         from grooming_metadata import clear_grooming_pending, is_grooming_pending, parse_grooming_fields
 
-        import chromadb
-        from hybrid_search import CHROMA_DB_PATH
+        from hybrid_search import get_chroma_client
 
-        client = chromadb.PersistentClient(path=CHROMA_DB_PATH)
-        col = client.get_collection('mem0')
+        col = get_chroma_client().get_collection('mem0')
         raw = col.get(ids=[memory_id], include=['metadatas'])
         if not raw.get('ids'):
             return f'记忆不存在: {memory_id}'

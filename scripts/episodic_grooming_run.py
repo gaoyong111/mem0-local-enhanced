@@ -20,18 +20,16 @@ from grooming_episodic import (  # noqa: E402
     build_merge_hints,
 )
 from grooming_metadata import apply_grooming_pending, write_merge_hints  # noqa: E402
-from hybrid_search import CHROMA_DB_PATH, hybrid_search, normalize_project  # noqa: E402
+from hybrid_search import get_chroma_client, hybrid_search, normalize_project  # noqa: E402
 from mem0_add_policy import DEFAULT_CATEGORY, apply_mem0_patches, normalize_category  # noqa: E402
 
 apply_mem0_patches()
 
 
 def _load_grooming_from_chroma() -> dict[str, dict]:
-    import chromadb
-
     from grooming_metadata import parse_grooming_fields
 
-    client = chromadb.PersistentClient(path=CHROMA_DB_PATH)
+    client = get_chroma_client()
     col = client.get_collection('mem0')
     raw = col.get(include=['metadatas'])
     result: dict[str, dict] = {}
@@ -77,12 +75,10 @@ def _load_llm():
 
 
 def _update_chroma_metadata(memory_id: str, patches: dict) -> None:
-    import chromadb
-
     from grooming_metadata import GROOMING_META_KEYS
     from mem0_add_policy import apply_category_metadata
 
-    client = chromadb.PersistentClient(path=CHROMA_DB_PATH)
+    client = get_chroma_client()
     col = client.get_collection('mem0')
     raw = col.get(ids=[memory_id], include=['metadatas'])
     if not raw.get('ids'):

@@ -19,10 +19,10 @@ if _MEM0_DIR not in sys.path:
 from mem0_paths import ACTIVE_DB  # noqa: E402
 
 from hybrid_search import (  # noqa: E402
-    CHROMA_DB_PATH,
     HISTORY_DB,
     detect_project,
     extract_keywords,
+    get_chroma_client,
     hybrid_search,
     infer_memory_lang,
     normalize_project,
@@ -57,7 +57,6 @@ DEFAULT_USER = os.getenv('MEM0_USER_ID', 'default-user')
 MCP_SEARCH_MAX_RESULTS = 8
 _PRIMARY_CONFIG = os.getenv('MEM0_CONFIG', os.path.expanduser('~/.mem0/config_local.json'))
 _FALLBACK_CONFIG = os.getenv('MEM0_FALLBACK_CONFIG', os.path.expanduser('~/.mem0/config_ollama.json'))
-_chroma_client = None
 _chroma_collection = None
 
 # 项目颜色映射（固定 8 色，超出后循环）
@@ -327,15 +326,11 @@ def _load_mem0_config() -> dict:
 
 
 def _get_chroma_collection():
-    """进程内单例 Chroma collection，避免与 mem0 Memory 重复初始化冲突。"""
-    global _chroma_client, _chroma_collection
+    """进程内单例 Chroma collection，复用 hybrid_search 共享客户端。"""
+    global _chroma_collection
     if _chroma_collection is not None:
         return _chroma_collection
-
-    import chromadb
-
-    _chroma_client = chromadb.PersistentClient(path=CHROMA_DB_PATH)
-    _chroma_collection = _chroma_client.get_collection('mem0')
+    _chroma_collection = get_chroma_client().get_collection('mem0')
     return _chroma_collection
 
 

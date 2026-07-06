@@ -12,7 +12,7 @@ from typing import Any
 
 from memory_lineage import record_event
 
-from mem0_paths import ACTIVE_DB, CHROMA_DB_PATH, HISTORY_DB, SYNC_PENDING_DIR
+from mem0_paths import ACTIVE_DB, HISTORY_DB, SYNC_PENDING_DIR
 
 MAX_SYNC_RETRY = 3
 
@@ -195,10 +195,9 @@ def migrate_active_if_needed() -> dict[str, Any]:
 
     deleted = load_deleted_ids()
     try:
-        import chromadb
+        from hybrid_search import get_chroma_client
 
-        client = chromadb.PersistentClient(path=CHROMA_DB_PATH)
-        col = client.get_collection('mem0')
+        col = get_chroma_client().get_collection('mem0')
         raw = col.get(include=['metadatas'])
     except Exception as error:
         return {'error': str(error)}
@@ -242,10 +241,9 @@ def migrate_active_if_needed() -> dict[str, Any]:
 
 def _chroma_delete(memory_id: str) -> int:
     try:
-        import chromadb
+        from hybrid_search import get_chroma_client
 
-        client = chromadb.PersistentClient(path=CHROMA_DB_PATH)
-        col = client.get_collection('mem0')
+        col = get_chroma_client().get_collection('mem0')
         existing = col.get(ids=[memory_id], include=[])
         if not existing.get('ids'):
             return 0

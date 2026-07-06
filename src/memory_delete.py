@@ -9,7 +9,7 @@ from typing import Any, Callable
 
 from memory_lineage import record_event
 
-from mem0_paths import CHROMA_DB_PATH, DELETED_DB, HISTORY_DB
+from mem0_paths import DELETED_DB, HISTORY_DB
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS deleted_memories (
@@ -88,10 +88,9 @@ def get_deleted_record(memory_id: str) -> dict[str, Any] | None:
 
 def _snapshot_from_chroma(memory_id: str) -> dict[str, str]:
     try:
-        import chromadb
+        from hybrid_search import get_chroma_client
 
-        client = chromadb.PersistentClient(path=CHROMA_DB_PATH)
-        col = client.get_collection('mem0')
+        col = get_chroma_client().get_collection('mem0')
         raw = col.get(ids=[memory_id], include=['metadatas'])
         ids = raw.get('ids') or []
         if not ids:

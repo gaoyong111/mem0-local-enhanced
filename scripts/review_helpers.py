@@ -12,10 +12,14 @@ from datetime import datetime
 from typing import Any
 
 MEM0_DIR = os.path.expanduser('~/.mem0')
+_SRC_DIR = os.path.join(os.path.dirname(__file__), '..', 'src')
+if os.path.isdir(_SRC_DIR) and _SRC_DIR not in sys.path:
+    sys.path.insert(0, _SRC_DIR)
+if MEM0_DIR not in sys.path:
+    sys.path.insert(0, MEM0_DIR)
 REVIEW_DIR = os.path.expanduser('~/daily-reviews')
 DATA_DIR = os.path.join(REVIEW_DIR, '.data')
 HISTORY_DB = os.path.join(MEM0_DIR, 'history.db')
-CHROMA_DB_PATH = os.path.join(MEM0_DIR, 'chroma_db')
 CRON_RENEWAL_LOG = os.path.join(REVIEW_DIR, 'cron-renewal.log')
 LAST_SCAN_END_FILE = os.path.join(DATA_DIR, 'last-scan-end.txt')
 MISSED_RUN_HOURS = 36
@@ -204,10 +208,9 @@ def _load_final_memories() -> dict[str, str]:
 
 def _load_memory_metadata() -> dict[str, dict[str, str]]:
     try:
-        import chromadb
+        from hybrid_search import get_chroma_client
 
-        client = chromadb.PersistentClient(path=CHROMA_DB_PATH)
-        col = client.get_collection('mem0')
+        col = get_chroma_client().get_collection('mem0')
         result = col.get(include=['metadatas'])
     except Exception:
         return {}
