@@ -1,5 +1,12 @@
 # mem0-local-enhanced
 
+> **已归档**：本项目不再演进。继任项目 **[local-memory](https://github.com/gaoyong111/local-memory)**（v2，无 mem0 依赖）。
+>
+> - **新用户**：请直接 clone [local-memory](https://github.com/gaoyong111/local-memory)
+> - **老用户**：先 clone [local-memory](https://github.com/gaoyong111/local-memory)，再运行 `bash scripts/migrate_full_to_v2.sh` 迁移 `~/.mem0/` 数据 → [迁移指南](https://github.com/gaoyong111/local-memory/blob/master/docs/v2-migration.md)
+>
+> 运行时代码部署至 `~/.memory/runtime/`；过渡期数据仍在 `~/.mem0/`（symlink）。
+
 本地 mem0 增强方案 —— 混合检索 + 智能写入策略 + 三层注入 + 每日复盘闭环 + Web UI 可视化
 
 [English documentation → README_EN.md](README_EN.md)

@@ -1,5 +1,12 @@
 # mem0-local-enhanced
 
+> **Archived.** This project is no longer maintained. Successor: **[local-memory](https://github.com/gaoyong111/local-memory)** (v2, no mem0 dependency).
+>
+> - **New users:** clone [local-memory](https://github.com/gaoyong111/local-memory)
+> - **Existing users:** clone [local-memory](https://github.com/gaoyong111/local-memory) first, then run `bash scripts/migrate_full_to_v2.sh` to move `~/.mem0/` data → [migration guide](https://github.com/gaoyong111/local-memory/blob/master/docs/v2-migration.md)
+>
+> Runtime deploys to `~/.memory/runtime/`; transition data remains in `~/.mem0/` (symlink).
+
 Local mem0 enhancement — hybrid search + smart write policies + three-layer injection + daily review loop + Web UI
 
 [中文文档 → README.md](README.md)
